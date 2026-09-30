@@ -1,7 +1,7 @@
 # -*- mode: python ; coding: utf-8 -*-
 from PyInstaller.utils.hooks import collect_all
 
-datas = [('C:/Users/claim1/OneDrive - PT TRI DHARMA PROTEKSI/Documents/New folder/assets', 'assets')]
+datas = [('C:/Users/claim1/Documents/subfolderx/New folder/assets', 'assets')]
 binaries = []
 hiddenimports = []
 tmp_ret = collect_all('customtkinter')
@@ -12,10 +12,14 @@ tmp_ret = collect_all('pystray')
 datas += tmp_ret[0]; binaries += tmp_ret[1]; hiddenimports += tmp_ret[2]
 tmp_ret = collect_all('pynput')
 datas += tmp_ret[0]; binaries += tmp_ret[1]; hiddenimports += tmp_ret[2]
+tmp_ret = collect_all('plyer')
+datas += tmp_ret[0]; binaries += tmp_ret[1]; hiddenimports += tmp_ret[2]
+tmp_ret = collect_all('winotify')
+datas += tmp_ret[0]; binaries += tmp_ret[1]; hiddenimports += tmp_ret[2]
 
 
 a = Analysis(
-    ['C:/Users/claim1/OneDrive - PT TRI DHARMA PROTEKSI/Documents/New folder/app.py'],
+    ['C:/Users/claim1/Documents/subfolderx/New folder/app.py'],
     pathex=[],
     binaries=binaries,
     datas=datas,
