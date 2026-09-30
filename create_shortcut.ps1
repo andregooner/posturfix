@@ -6,10 +6,15 @@ if (Test-Path "$desktop\Posture Guardian.lnk") {
     Remove-Item -Force "$desktop\Posture Guardian.lnk" -ErrorAction SilentlyContinue
 }
 
-$exePath = "C:\Users\claim1\OneDrive - PT TRI DHARMA PROTEKSI\Documents\New folder\dist\PosturFix\PosturFix.exe"
+$scriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
+if (-not $scriptDir) { $scriptDir = (Get-Location).Path }
+$exePath = Join-Path $scriptDir "dist\PosturFix\PosturFix.exe"
+$workDir = Join-Path $scriptDir "dist\PosturFix"
+
 $shortcut = $wsh.CreateShortcut("$desktop\PosturFix.lnk")
 $shortcut.TargetPath = $exePath
-$shortcut.WorkingDirectory = "C:\Users\claim1\OneDrive - PT TRI DHARMA PROTEKSI\Documents\New folder\dist\PosturFix"
+$shortcut.WorkingDirectory = $workDir
+$shortcut.Arguments = ""
 $shortcut.Description = "PosturFix - 100% Offline Posture Monitor"
 $shortcut.Save()
 

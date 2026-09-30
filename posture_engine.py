@@ -47,6 +47,9 @@ class PostureMetrics:
     baseline_head_tilt_deg: float = 0.0
     shoulder_width: float = 0.0
     baseline_shoulder_width: float = 0.0
+    eye_distance: float = 0.0
+    baseline_eye_distance: float = 0.0
+    is_screen_too_close: bool = False
     slouch_duration: float = 0.0
     slouch_reason: str = ""
     is_calibrated: bool = False
@@ -86,6 +89,7 @@ class PostureEngine:
         self.baseline_shoulder_tilt_deg: float = 0.0
         self.baseline_head_tilt_deg: float = 0.0
         self.baseline_shoulder_width: float = 0.0
+        self.baseline_eye_distance: float = 0.0
 
         # Calibration state buffer
         self.calibrating: bool = False
@@ -183,6 +187,7 @@ class PostureEngine:
             baseline_shoulder_tilt_deg=self.baseline_shoulder_tilt_deg,
             baseline_head_tilt_deg=self.baseline_head_tilt_deg,
             baseline_shoulder_width=self.baseline_shoulder_width,
+            baseline_eye_distance=self.baseline_eye_distance,
         )
 
         # Requirement 4: Fast-Fail (Idle Mode)
@@ -207,7 +212,7 @@ class PostureEngine:
         ear_left = landmarks[self.mp_pose.PoseLandmark.LEFT_EAR]
         ear_right = landmarks[self.mp_pose.PoseLandmark.RIGHT_EAR]
 
-        # Nose & Eyes for head tracking
+        # Nose & Eyes for head tracking & eye distance
         nose = landmarks[self.mp_pose.PoseLandmark.NOSE]
         eye_left = landmarks[self.mp_pose.PoseLandmark.LEFT_EYE]
         eye_right = landmarks[self.mp_pose.PoseLandmark.RIGHT_EYE]
@@ -226,6 +231,8 @@ class PostureEngine:
         p_ear_left = (ear_left.x * w, ear_left.y * h)
         p_ear_right = (ear_right.x * w, ear_right.y * h)
         p_nose = (nose.x * w, nose.y * h)
+        p_eye_left = (eye_left.x * w, eye_left.y * h)
+        p_eye_right = (eye_right.x * w, eye_right.y * h)
 
         # Midpoints
         mid_shoulder = (
@@ -241,6 +248,10 @@ class PostureEngine:
         # Used to normalize vertical distances against camera zoom or moving back/forth
         shoulder_width = self._euclidean_distance(p_sh_left, p_sh_right)
         shoulder_width = max(shoulder_width, 1.0)  # Avoid zero division
+
+        # Eye Distance: Euclidean distance between Left Eye and Right Eye
+        eye_distance = self._euclidean_distance(p_eye_left, p_eye_right)
+        metrics.eye_distance = eye_distance
 
         # Neck Vertical Distance: Head vertical height above shoulder line
         # In image coordinates, Y increases downward. So shoulder.y > ear.y when upright.
@@ -267,6 +278,7 @@ class PostureEngine:
                 "shoulder_tilt": shoulder_tilt_deg,
                 "head_tilt": head_tilt_deg,
                 "shoulder_width": shoulder_width,
+                "eye_distance": eye_distance,
             })
 
             progress = len(self._calibration_samples) / float(self.config.calibration_frame_count)
@@ -278,21 +290,23 @@ class PostureEngine:
                 self.baseline_shoulder_tilt_deg = float(np.mean([s["shoulder_tilt"] for s in self._calibration_samples]))
                 self.baseline_head_tilt_deg = float(np.mean([s["head_tilt"] for s in self._calibration_samples]))
                 self.baseline_shoulder_width = float(np.mean([s["shoulder_width"] for s in self._calibration_samples]))
+                self.baseline_eye_distance = float(np.mean([s["eye_distance"] for s in self._calibration_samples]))
 
                 self.is_calibrated = True
                 self.calibrating = False
                 metrics.is_calibrated = True
+                metrics.baseline_eye_distance = self.baseline_eye_distance
                 metrics.state = PostureState.GOOD
                 self._slouch_start_time = None
 
             # Render calibration visuals
-            self._render_overlay(annotated_frame, mid_shoulder, mid_ear, p_sh_left, p_sh_right, metrics.state)
+            self._render_overlay(annotated_frame, mid_shoulder, mid_ear, p_sh_left, p_sh_right, p_eye_left, p_eye_right, metrics.state, False)
             return annotated_frame, metrics
 
         if not self.is_calibrated:
             metrics.state = PostureState.UNCALIBRATED
             metrics.slouch_reason = "Please sit upright and click Calibrate"
-            self._render_overlay(annotated_frame, mid_shoulder, mid_ear, p_sh_left, p_sh_right, metrics.state)
+            self._render_overlay(annotated_frame, mid_shoulder, mid_ear, p_sh_left, p_sh_right, p_eye_left, p_eye_right, metrics.state, False)
             return annotated_frame, metrics
 
         # -------------------------------------------------------------
@@ -315,10 +329,22 @@ class PostureEngine:
         if head_tilt_diff > self.config.head_tilt_threshold_deg:
             reasons.append(f"Head tilt ({int(head_tilt_diff)}°)")
 
-        # 4. Leaning excessively forward into the screen
+        # 4. Leaning excessively forward into the screen (Shoulder width check)
         width_expansion = (shoulder_width - self.baseline_shoulder_width) / max(0.001, self.baseline_shoulder_width)
         if width_expansion > self.config.forward_lean_threshold:
             reasons.append("Leaning too close to screen")
+
+        # 5. Eye-to-Screen Distance (Screen Proximity / Eye Strain Prevention)
+        if (
+            self.config.eye_distance_warning_enabled
+            and self.baseline_eye_distance > 1.0
+            and eye_left.visibility >= 0.4
+            and eye_right.visibility >= 0.4
+        ):
+            eye_expansion = (eye_distance - self.baseline_eye_distance) / self.baseline_eye_distance
+            if eye_expansion > self.config.eye_distance_threshold_ratio:
+                reasons.append(f"Screen Too Close / Lean Back ({int(eye_expansion * 100)}% closer)")
+                metrics.is_screen_too_close = True
 
         is_slouching = len(reasons) > 0
         metrics.slouch_reason = ", ".join(reasons) if is_slouching else "Good posture maintained"
@@ -354,7 +380,17 @@ class PostureEngine:
         self._last_state = metrics.state
 
         # Render Visual Overlays on Frame
-        self._render_overlay(annotated_frame, mid_shoulder, mid_ear, p_sh_left, p_sh_right, metrics.state)
+        self._render_overlay(
+            annotated_frame,
+            mid_shoulder,
+            mid_ear,
+            p_sh_left,
+            p_sh_right,
+            p_eye_left,
+            p_eye_right,
+            metrics.state,
+            metrics.is_screen_too_close,
+        )
 
         return annotated_frame, metrics
 
@@ -372,7 +408,10 @@ class PostureEngine:
         mid_ear: Tuple[float, float],
         sh_left: Tuple[float, float],
         sh_right: Tuple[float, float],
+        eye_left: Tuple[float, float],
+        eye_right: Tuple[float, float],
         state: PostureState,
+        is_screen_too_close: bool = False,
     ) -> None:
         """Draws aesthetic posture vectors and landmark nodes directly onto the frame."""
         if not self.config.draw_skeleton:
@@ -401,6 +440,14 @@ class PostureEngine:
         # Draw Neck Spine Vector
         cv2.line(frame, pt_mid_sh, pt_mid_ear, color, 3, cv2.LINE_AA)
 
+        # Draw Eye Distance Axis (Screen proximity indicator)
+        pt_eye_l = (int(eye_left[0]), int(eye_left[1]))
+        pt_eye_r = (int(eye_right[0]), int(eye_right[1]))
+        eye_color = (60, 60, 235) if is_screen_too_close else (255, 235, 175)
+        cv2.line(frame, pt_eye_l, pt_eye_r, eye_color, 2, cv2.LINE_AA)
+        cv2.circle(frame, pt_eye_l, 4, eye_color, -1, cv2.LINE_AA)
+        cv2.circle(frame, pt_eye_r, 4, eye_color, -1, cv2.LINE_AA)
+
         # Draw Landmark Keypoints
         cv2.circle(frame, pt_mid_sh, 6, (255, 255, 255), -1, cv2.LINE_AA)
         cv2.circle(frame, pt_mid_sh, 8, color, 2, cv2.LINE_AA)
@@ -419,16 +466,19 @@ class PostureEngine:
             self.config.shoulder_tilt_threshold_deg = 8.0
             self.config.head_tilt_threshold_deg = 10.0
             self.config.forward_lean_threshold = 0.20
+            self.config.eye_distance_threshold_ratio = 0.20
         elif level == "low":
             self.config.neck_ratio_drop_threshold = 0.25
             self.config.shoulder_tilt_threshold_deg = 18.0
             self.config.head_tilt_threshold_deg = 20.0
             self.config.forward_lean_threshold = 0.40
+            self.config.eye_distance_threshold_ratio = 0.40
         else:  # Medium default
             self.config.neck_ratio_drop_threshold = 0.18
             self.config.shoulder_tilt_threshold_deg = 12.0
             self.config.head_tilt_threshold_deg = 14.0
             self.config.forward_lean_threshold = 0.30
+            self.config.eye_distance_threshold_ratio = 0.30
 
     def close(self) -> None:
         """Releases MediaPipe and memory resources cleanly."""

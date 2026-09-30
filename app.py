@@ -445,6 +445,18 @@ class PostureApp(ctk.CTk):
         self.state("normal")
         self.lift()
         self.focus_force()
+        if hasattr(self, "camera_status_lbl"):
+            if self.cap and self.cap.isOpened():
+                self.camera_status_lbl.configure(
+                    text=f"Camera: Connected ({self.config.frame_width}x{self.config.frame_height} Lite)",
+                    text_color="#10B981",
+                )
+            elif self.is_snoozed():
+                rem_mins = max(1, int(math.ceil((self.snooze_until - time.time()) / 60.0)))
+                self.camera_status_lbl.configure(
+                    text=f"Camera: Paused ({rem_mins}m left)",
+                    text_color="#F59E0B",
+                )
         if hasattr(self, "_camera_retry_event"):
             self._camera_retry_event.set()
 
@@ -554,14 +566,14 @@ class PostureApp(ctk.CTk):
             with winreg.OpenKey(winreg.HKEY_CURRENT_USER, reg_path, 0, winreg.KEY_SET_VALUE | winreg.KEY_READ) as key:
                 if target_enabled:
                     if getattr(sys, "frozen", False):
-                        cmd = f'"{sys.executable}"'
+                        cmd = f'"{sys.executable}" --minimized'
                     else:
                         python_dir = os.path.dirname(sys.executable)
                         pythonw = os.path.join(python_dir, "pythonw.exe")
                         if not os.path.exists(pythonw):
                             pythonw = sys.executable
                         app_file = os.path.abspath(__file__)
-                        cmd = f'"{pythonw}" "{app_file}"'
+                        cmd = f'"{pythonw}" "{app_file}" --minimized'
 
                     winreg.SetValueEx(key, "PosturFix", 0, winreg.REG_SZ, cmd)
                     msg = "PosturFix will now run automatically on system boot."
@@ -1056,24 +1068,27 @@ class PostureApp(ctk.CTk):
         """
         cap = None
         try:
+            # On Windows, cv2.CAP_DSHOW is reliable, fast, and avoids MSMF driver lockups
             backend = cv2.CAP_DSHOW if sys.platform == "win32" else cv2.CAP_ANY
             cap = cv2.VideoCapture(self.config.camera_index, backend)
-            if not cap.isOpened():
+            if not cap.isOpened() and sys.platform != "win32":
                 cap = cv2.VideoCapture(self.config.camera_index)
 
             if cap.isOpened():
                 cap.set(cv2.CAP_PROP_FRAME_WIDTH, self.config.frame_width)
                 cap.set(cv2.CAP_PROP_FRAME_HEIGHT, self.config.frame_height)
-                # Verify camera actually delivers valid non-empty frames
-                ret, test_frame = cap.read()
-                if ret and test_frame is not None and test_frame.size > 0:
-                    return cap
-                else:
-                    try:
-                        cap.release()
-                    except Exception:
-                        pass
-                    return None
+                # Warm-up loop: webcams need a few hundred milliseconds to negotiate capture graph
+                for _ in range(12):
+                    ret, test_frame = cap.read()
+                    if ret and test_frame is not None and test_frame.size > 0:
+                        return cap
+                    time.sleep(0.08)
+
+                try:
+                    cap.release()
+                except Exception:
+                    pass
+                return None
         except Exception:
             if cap:
                 try:
@@ -1089,7 +1104,7 @@ class PostureApp(ctk.CTk):
         - Foreground Mode (Visible): runs at ~20 FPS for fluid, real-time webcam feedback.
         - Deep Sleep Mode: powers down camera after 2m of global OS inactivity.
         - Snooze / Pause Mode: completely releases webcam and sleeps until timer expires or resumed.
-        - Camera Conflict Handling: backs off for 60s if locked by Zoom/Meet with 0% CPU.
+        - Camera Conflict Handling: backs off if locked by Zoom/Meet with progressive retry.
         - Thread-Safe & Non-Blocking: Tkinter mainloop and System Tray menu never hitch or lag.
         """
         last_check_time = 0.0
@@ -1097,6 +1112,8 @@ class PostureApp(ctk.CTk):
         fps_start_time = time.time()
         was_calibrating = False
         is_in_deep_sleep = False
+        consecutive_read_failures = 0
+        camera_error_streak = 0
 
         while self.camera_running:
             try:
@@ -1127,9 +1144,9 @@ class PostureApp(ctk.CTk):
                         self.after(0, lambda m=rem_mins: self._render_privacy_screen(
                             f"Posture Monitoring Paused\n{m} minutes remaining\nRight-click tray icon and select Resume to continue"
                         ))
-                        self.after(0, lambda m=rem_mins: self.camera_status_lbl.configure(
-                            text=f"Camera: Paused ({m}m left)", text_color="#F59E0B"
-                        ))
+                    self.after(0, lambda m=rem_mins: self.camera_status_lbl.configure(
+                        text=f"Camera: Paused ({m}m left)", text_color="#F59E0B"
+                    ))
 
                     # Sleep on event without CPU polling (up to 10s or until user clicks Resume)
                     self._snooze_event.wait(timeout=min(10.0, max(0.5, rem_seconds)))
@@ -1166,9 +1183,9 @@ class PostureApp(ctk.CTk):
                             self.after(0, lambda: self._render_privacy_screen(
                                 "Deep Sleep Mode Active\nNo Mouse/Keyboard Activity for 2m • Camera Off"
                             ))
-                            self.after(0, lambda: self.camera_status_lbl.configure(
-                                text="Camera: Deep Sleep (Powered Off)", text_color="#3B82F6"
-                            ))
+                        self.after(0, lambda: self.camera_status_lbl.configure(
+                            text="Camera: Deep Sleep (Powered Off)", text_color="#3B82F6"
+                        ))
 
                     # While in Deep Sleep:
                     # Do not open cv2.VideoCapture(0). Zero camera usage.
@@ -1198,34 +1215,34 @@ class PostureApp(ctk.CTk):
                 # -------------------------------------------------------------
                 # 4. CAMERA CONFLICT HANDLING & INITIALIZATION
                 # If camera is closed or locked by another app (Zoom/Teams/Meet),
-                # safely retry and back off for 60s without crashing or busy looping.
+                # safely retry without crashing or busy looping.
                 # -------------------------------------------------------------
                 if self.cap is None or not self.cap.isOpened():
                     self.cap = self._open_camera_safe()
                     if self.cap is None:
-                        # Camera in use by another app or unavailable
+                        camera_error_streak += 1
                         if hasattr(self, "tray_icon") and self.tray_icon:
                             self.tray_icon.title = "PosturFix: Camera in use by another app"
 
+                        self.after(0, lambda: self.camera_status_lbl.configure(
+                            text="Camera in use by another app (Zoom/Meet)", text_color="#EF4444"
+                        ))
                         if is_visible:
-                            self.after(0, lambda: self.camera_status_lbl.configure(
-                                text="Camera in use by another app (Zoom/Meet)", text_color="#EF4444"
-                            ))
                             self.after(0, lambda: self._render_privacy_screen(
-                                "Camera in use by another app\n(Zoom, Meet, or Teams)\nRetrying in 60s to save battery"
+                                "Camera in use by another app\n(Zoom, Meet, or Teams)\nReconnecting automatically..."
                             ))
 
-                        # Battery-saving 60s backoff wait using OS kernel event (0.0% CPU)
-                        retry_sec = self.config.camera_retry_interval_busy_seconds
+                        retry_sec = 3.0 if camera_error_streak <= 3 else 10.0
                         self._camera_retry_event.wait(timeout=retry_sec)
                         self._camera_retry_event.clear()
                         continue
                     else:
-                        if is_visible:
-                            self.after(0, lambda: self.camera_status_lbl.configure(
-                                text=f"Camera: Connected ({self.config.frame_width}x{self.config.frame_height} Lite)",
-                                text_color="#10B981"
-                            ))
+                        camera_error_streak = 0
+                        consecutive_read_failures = 0
+                        self.after(0, lambda: self.camera_status_lbl.configure(
+                            text=f"Camera: Connected ({self.config.frame_width}x{self.config.frame_height} Lite)",
+                            text_color="#10B981"
+                        ))
 
                 # In background tray mode: only grab and check once every 3.0 seconds (unless calibrating)
                 if not is_visible and not is_calibrating:
@@ -1244,7 +1261,14 @@ class PostureApp(ctk.CTk):
 
                 # Camera conflict / empty frame check
                 if not ret or frame is None or frame.size == 0:
-                    # Camera locked mid-session or disconnected
+                    consecutive_read_failures += 1
+                    # Tolerate brief single-frame drops without releasing camera graph
+                    if consecutive_read_failures < 6:
+                        time.sleep(0.05)
+                        continue
+
+                    # Camera disconnected or seized by another app after 6 consecutive failed reads
+                    consecutive_read_failures = 0
                     if self.cap is not None:
                         try:
                             self.cap.release()
@@ -1255,19 +1279,19 @@ class PostureApp(ctk.CTk):
                     if hasattr(self, "tray_icon") and self.tray_icon:
                         self.tray_icon.title = "PosturFix: Camera in use by another app"
 
+                    self.after(0, lambda: self.camera_status_lbl.configure(
+                        text="Camera: Disconnected / In use by another app", text_color="#EF4444"
+                    ))
                     if is_visible:
-                        self.after(0, lambda: self.camera_status_lbl.configure(
-                            text="Camera: In use by another app", text_color="#EF4444"
-                        ))
                         self.after(0, lambda: self._render_privacy_screen(
-                            "Camera in use by another app\n(Zoom, Meet, or Teams)\nRetrying in 60s to save battery"
+                            "Camera disconnected or seized by Zoom/Meet\nReconnecting automatically..."
                         ))
 
-                    # Sleep 60 seconds before retrying (0% CPU)
-                    retry_sec = self.config.camera_retry_interval_busy_seconds
-                    self._camera_retry_event.wait(timeout=retry_sec)
+                    self._camera_retry_event.wait(timeout=3.0)
                     self._camera_retry_event.clear()
                     continue
+
+                consecutive_read_failures = 0
 
                 frame = cv2.flip(frame, 1)
 
@@ -1369,7 +1393,9 @@ class PostureApp(ctk.CTk):
                     # When hidden in tray, sleep for the 3-second interval
                     time.sleep(0.1 if is_calibrating else interval)
 
-            except Exception:
+            except Exception as e:
+                import traceback
+                print(f"[PosturFix Worker Error]: {e}", file=sys.stderr)
                 time.sleep(0.2)
 
         # Release capture when thread terminates
@@ -1392,8 +1418,11 @@ class PostureApp(ctk.CTk):
             self._render_privacy_screen("Privacy Mode Active\nCamera Preview Hidden • Analysis Active in RAM")
             return
 
-        canvas_w = max(10, self.video_canvas.winfo_width())
-        canvas_h = max(10, self.video_canvas.winfo_height())
+        canvas_w = self.video_canvas.winfo_width()
+        canvas_h = self.video_canvas.winfo_height()
+        if canvas_w < 50 or canvas_h < 50:
+            canvas_w = 540
+            canvas_h = 405
 
         h, w, _ = frame_bgr.shape
         scale = min(canvas_w / w, canvas_h / h)
@@ -1535,8 +1564,8 @@ class PostureApp(ctk.CTk):
 
 
 def main():
-    """Application entry point: starts quietly in system tray by default."""
-    start_hidden = "--show" not in sys.argv
+    """Application entry point: starts visible by default, runs hidden in tray if --minimized or --tray."""
+    start_hidden = ("--minimized" in sys.argv or "--tray" in sys.argv) and ("--show" not in sys.argv)
     app = PostureApp(start_hidden=start_hidden)
     app.mainloop()
 
