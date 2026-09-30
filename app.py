@@ -344,6 +344,10 @@ class PostureApp(ctk.CTk):
         self._away_start_time: Optional[float] = None
         self._last_posture_check: float = 0.0
 
+        # Visual Pop-out Toast Notification Cooldown Tracking
+        self._last_toast_time: float = 0.0
+        self._toast_lock = threading.Lock()
+
         # Load Icon
         self.app_icon = get_or_create_placeholder_icon()
         try:
@@ -623,6 +627,75 @@ class PostureApp(ctk.CTk):
         self.sitting_seconds = 0.0
         self._away_start_time = None
 
+    def _format_toast_message(self, metrics: PostureMetrics) -> str:
+        """Generates dynamic, informative message for the visual toast notification."""
+        if metrics.is_screen_too_close:
+            return "Your face is too close to the screen! Please lean back to protect your eyes."
+
+        reason = metrics.slouch_reason.lower() if metrics.slouch_reason else ""
+        if "neck" in reason:
+            return "You are slouching! Please sit up straight and lift your neck."
+        elif "shoulder" in reason:
+            return "Uneven shoulders detected! Please sit up straight."
+        elif "head tilt" in reason:
+            return "Head tilt detected! Please keep your head level."
+        elif "leaning" in reason:
+            return "Leaning too close to the screen! Please sit back."
+        else:
+            return "You are slouching! Please sit up straight."
+
+    def trigger_posture_toast(self, metrics: PostureMetrics) -> None:
+        """
+        Fires an asynchronous, non-blocking native OS pop-out toast notification
+        when slouching or screen proximity is detected.
+        Guarantees:
+        - Asynchronous / daemon thread: NEVER blocks or delays the 3-second camera checking interval.
+        - Cooldown mechanism: limits toast frequency to once per cooldown window (default 25s).
+        - Primary: cross-platform plyer.notification.notify.
+        - Fallback: native Windows authenticated tray notification via pystray.
+        """
+        if not self.config.toast_notification_enabled:
+            return
+
+        now = time.time()
+        with self._toast_lock:
+            if (now - self._last_toast_time) < self.config.toast_cooldown_seconds:
+                return  # Within cooldown window; suppress to prevent desktop spam
+            self._last_toast_time = now
+
+        title = self.config.toast_title
+        message = self._format_toast_message(metrics)
+
+        def _toast_worker():
+            delivered = False
+            # Attempt 1: Cross-platform plyer notification
+            try:
+                from plyer import notification
+                notification.notify(
+                    title=title,
+                    message=message,
+                    app_name=self.config.toast_app_name,
+                    timeout=5,
+                )
+                delivered = True
+            except Exception:
+                pass
+
+            # Attempt 2: Fallback to active pystray shell notification (guaranteed Windows delivery)
+            if not delivered and hasattr(self, "tray_icon") and self.tray_icon:
+                try:
+                    self.tray_icon.notify(message, title)
+                    delivered = True
+                except Exception:
+                    pass
+
+        # Dedicated background daemon thread: non-blocking execution
+        threading.Thread(
+            target=_toast_worker,
+            daemon=True,
+            name="PosturFix-ToastWorker",
+        ).start()
+
     def quit_application(self):
         """Stops background threads and exits cleanly."""
         self.camera_running = False
@@ -709,7 +782,16 @@ class PostureApp(ctk.CTk):
         )
         if self.config.audio_alert_enabled:
             self.audio_switch.select()
-        self.audio_switch.pack(side="left", padx=(0, 12))
+        self.audio_switch.pack(side="left", padx=(0, 10))
+
+        self.toast_switch = ctk.CTkSwitch(
+            header_ctrls,
+            text="Pop-out Toast",
+            command=self._on_toast_switch_toggle,
+        )
+        if self.config.toast_notification_enabled:
+            self.toast_switch.select()
+        self.toast_switch.pack(side="left", padx=(0, 12))
 
         tray_btn = ctk.CTkButton(
             header_ctrls,
@@ -1230,6 +1312,10 @@ class PostureApp(ctk.CTk):
                 if self.config.sedentary_reminder_enabled and self.sitting_seconds >= target_seconds:
                     self.after(0, self.trigger_sedentary_alert)
 
+                # Trigger Visual Pop-out Toast Notification on Slouch or Screen Too Close (Non-blocking & Cooldown Protected)
+                if metrics.state in (PostureState.WARNING, PostureState.SLOUCHING):
+                    self.trigger_posture_toast(metrics)
+
                 # Update tray tooltip dynamically
                 if metrics.is_screen_too_close:
                     status_text = "ALERT: Screen Too Close / Lean Back!" if metrics.state == PostureState.SLOUCHING else "Warning: Screen Too Close"
@@ -1408,6 +1494,9 @@ class PostureApp(ctk.CTk):
 
     def _on_audio_switch_toggle(self):
         self.config.audio_alert_enabled = self.audio_switch.get() == 1
+
+    def _on_toast_switch_toggle(self):
+        self.config.toast_notification_enabled = self.toast_switch.get() == 1
 
     def _on_break_interval_change(self, choice: str):
         try:

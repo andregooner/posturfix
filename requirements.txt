@@ -5,3 +5,4 @@ pillow>=10.0.0
 pystray>=0.19.5
 pyinstaller>=6.0.0
 pynput>=1.8.0
+plyer>=2.1.0

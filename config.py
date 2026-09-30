@@ -40,6 +40,12 @@ class PostureConfig:
     audio_frequency_hz: int = 880                 # Pleasant warm notification tone
     audio_duration_ms: int = 250
 
+    # Visual Toast Notifications (Pop-out for silent environments)
+    toast_notification_enabled: bool = True
+    toast_cooldown_seconds: float = 25.0          # Minimum seconds between visual toasts to prevent desktop spam
+    toast_app_name: str = "PosturFix"
+    toast_title: str = "PosturFix Alert"
+
     # Calibration Settings
     calibration_frame_count: int = 10             # Number of baseline samples to average
 
