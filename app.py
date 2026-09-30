@@ -300,6 +300,87 @@ class MascotWidget(ctk.CTkFrame):
         self.speech_label.configure(text=dialogues.get(state, "Sit tall and stay healthy!"))
 
 
+class FloatingToastWindow(ctk.CTkToplevel):
+    """
+    Sleek, lightweight, borderless on-screen pop-out toast window.
+    Appears directly at the bottom-right corner of the desktop above all windows.
+    Guaranteed visibility: immune to Windows Focus Assist / Do Not Disturb suppression.
+    Automatically self-destructs after duration_ms (default 4500ms).
+    """
+    def __init__(self, parent, title: str, message: str, is_slouch: bool = True, duration_ms: int = 4500):
+        super().__init__(parent)
+        self.overrideredirect(True)
+        self.attributes("-topmost", True)
+
+        border_color = "#EF4444" if is_slouch else "#F59E0B"
+        bg_card = "#18181B" if ctk.get_appearance_mode() == "Dark" else "#FFFFFF"
+
+        container = ctk.CTkFrame(
+            self,
+            corner_radius=12,
+            border_width=2,
+            border_color=border_color,
+            fg_color=bg_card,
+        )
+        container.pack(fill="both", expand=True, padx=2, pady=2)
+
+        header_frame = ctk.CTkFrame(container, fg_color="transparent")
+        header_frame.pack(fill="x", padx=12, pady=(10, 4))
+
+        icon_emoji = "⚠️" if is_slouch else "👀"
+        icon_lbl = ctk.CTkLabel(header_frame, text=icon_emoji, font=ctk.CTkFont(size=16))
+        icon_lbl.pack(side="left", padx=(0, 8))
+
+        title_lbl = ctk.CTkLabel(
+            header_frame,
+            text=title,
+            font=ctk.CTkFont(size=13, weight="bold"),
+            text_color="#F87171" if is_slouch else "#FBBF24",
+        )
+        title_lbl.pack(side="left")
+
+        close_btn = ctk.CTkButton(
+            header_frame,
+            text="✕",
+            width=20,
+            height=20,
+            fg_color="transparent",
+            hover_color="#374151",
+            text_color="#9CA3AF",
+            font=ctk.CTkFont(size=11, weight="bold"),
+            command=self.dismiss,
+        )
+        close_btn.pack(side="right")
+
+        msg_lbl = ctk.CTkLabel(
+            container,
+            text=message,
+            font=ctk.CTkFont(size=11),
+            wraplength=280,
+            justify="left",
+            text_color="#E5E7EB" if ctk.get_appearance_mode() == "Dark" else "#1F2937",
+        )
+        msg_lbl.pack(fill="x", padx=12, pady=(0, 10))
+
+        # Position at bottom-right corner of screen (above taskbar)
+        self.update_idletasks()
+        w, h = 330, 95
+        screen_w = self.winfo_screenwidth()
+        screen_h = self.winfo_screenheight()
+        pos_x = max(10, screen_w - w - 24)
+        pos_y = max(10, screen_h - h - 60)
+        self.geometry(f"{w}x{h}+{pos_x}+{pos_y}")
+
+        # Self-destruct timer
+        self.after(duration_ms, self.dismiss)
+
+    def dismiss(self):
+        try:
+            self.destroy()
+        except Exception:
+            pass
+
+
 class PostureApp(ctk.CTk):
     """
     Main Desktop Window for PosturFix with System Tray & Sedentary Reminder.
@@ -665,23 +746,43 @@ class PostureApp(ctk.CTk):
 
         title = self.config.toast_title
         message = self._format_toast_message(metrics)
+        is_slouch = not metrics.is_screen_too_close
 
+        # 1. On-Screen Floating Pop-out Window (Guaranteed visible, immune to Focus Assist)
+        self.after(0, lambda: self._show_floating_toast(title, message, is_slouch))
+
+        # 2. Asynchronous Native OS Action Center Notification
         def _toast_worker():
             delivered = False
-            # Attempt 1: Cross-platform plyer notification
+            # Attempt 1: Modern Windows 10/11 Action Center Toast via winotify
             try:
-                from plyer import notification
-                notification.notify(
+                from winotify import Notification
+                toast = Notification(
+                    app_id=self.config.toast_app_name,
                     title=title,
-                    message=message,
-                    app_name=self.config.toast_app_name,
-                    timeout=5,
+                    msg=message,
+                    duration="short",
                 )
+                toast.show()
                 delivered = True
             except Exception:
                 pass
 
-            # Attempt 2: Fallback to active pystray shell notification (guaranteed Windows delivery)
+            # Attempt 2: Cross-platform plyer notification
+            if not delivered:
+                try:
+                    from plyer import notification
+                    notification.notify(
+                        title=title,
+                        message=message,
+                        app_name=self.config.toast_app_name,
+                        timeout=5,
+                    )
+                    delivered = True
+                except Exception:
+                    pass
+
+            # Attempt 3: Windows Shell authenticated tray notification via pystray
             if not delivered and hasattr(self, "tray_icon") and self.tray_icon:
                 try:
                     self.tray_icon.notify(message, title)
@@ -695,6 +796,13 @@ class PostureApp(ctk.CTk):
             daemon=True,
             name="PosturFix-ToastWorker",
         ).start()
+
+    def _show_floating_toast(self, title: str, message: str, is_slouch: bool):
+        """Displays on-screen floating toast card on the desktop."""
+        try:
+            FloatingToastWindow(self, title, message, is_slouch=is_slouch)
+        except Exception:
+            pass
 
     def quit_application(self):
         """Stops background threads and exits cleanly."""

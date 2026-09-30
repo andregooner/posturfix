@@ -46,6 +46,8 @@ def build_executable():
         "--collect-all=mediapipe",        # Ensure tflite models & binary pb are included
         "--collect-all=pystray",          # Ensure Windows tray hooks are included
         "--collect-all=pynput",           # Ensure global input hooks are included
+        "--collect-all=plyer",            # Ensure notification backend is included
+        "--collect-all=winotify",         # Ensure Windows 10/11 toast backend is included
         f"--add-data={assets_dir};assets" if sys.platform == "win32" else f"--add-data={assets_dir}:assets",
         os.path.join(project_dir, "app.py"),
     ]
