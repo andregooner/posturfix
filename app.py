@@ -281,6 +281,14 @@ class MascotWidget(ctk.CTkFrame):
         self._update_speech(state, slouch_reason)
 
     def _update_speech(self, state: PostureState, slouch_reason: str):
+        if "Screen Too Close" in slouch_reason:
+            if state == PostureState.SLOUCHING:
+                self.speech_label.configure(text="Too close to the screen! Please lean back to protect your eyes!")
+                return
+            elif state == PostureState.WARNING:
+                self.speech_label.configure(text="Screen Too Close / Lean Back to prevent eye strain!")
+                return
+
         dialogues = {
             PostureState.GOOD: "Awesome posture! Looking confident and energized!",
             PostureState.WARNING: "Heads up! Slouching detected, straighten up!",
@@ -1223,13 +1231,16 @@ class PostureApp(ctk.CTk):
                     self.after(0, self.trigger_sedentary_alert)
 
                 # Update tray tooltip dynamically
-                status_text = {
-                    PostureState.GOOD: "Good Posture",
-                    PostureState.WARNING: "Warning: Slouching",
-                    PostureState.SLOUCHING: "ALERT: Slouching Sustained",
-                    PostureState.CALIBRATING: "Calibrating...",
-                    PostureState.UNCALIBRATED: "Uncalibrated",
-                }.get(metrics.state, "Running")
+                if metrics.is_screen_too_close:
+                    status_text = "ALERT: Screen Too Close / Lean Back!" if metrics.state == PostureState.SLOUCHING else "Warning: Screen Too Close"
+                else:
+                    status_text = {
+                        PostureState.GOOD: "Good Posture",
+                        PostureState.WARNING: "Warning: Slouching",
+                        PostureState.SLOUCHING: "ALERT: Slouching Sustained",
+                        PostureState.CALIBRATING: "Calibrating...",
+                        PostureState.UNCALIBRATED: "Uncalibrated",
+                    }.get(metrics.state, "Running")
 
                 if hasattr(self, "tray_icon") and self.tray_icon:
                     score = int(metrics.session_good_posture_percentage)
@@ -1324,6 +1335,12 @@ class PostureApp(ctk.CTk):
         }
 
         title, text_color, _ = state_ui_map.get(state, ("UNKNOWN", "#9CA3AF", "#374151"))
+        if metrics.is_screen_too_close:
+            if state == PostureState.SLOUCHING:
+                title = "SCREEN TOO CLOSE / LEAN BACK!"
+            elif state == PostureState.WARNING:
+                title = "SCREEN TOO CLOSE / LEAN BACK"
+
         self.status_badge.configure(text=title, text_color=text_color)
         self.reason_badge.configure(text=metrics.slouch_reason or "All posture metrics normal.")
 

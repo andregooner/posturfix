@@ -29,6 +29,10 @@ class PostureConfig:
     head_tilt_threshold_deg: float = 14.0         # Max head tilt deviation in degrees
     forward_lean_threshold: float = 0.30          # Shoulder width increase >30% means leaning into screen
 
+    # Eye-to-Screen Distance (Screen Proximity / Eye Strain Warning)
+    eye_distance_warning_enabled: bool = True
+    eye_distance_threshold_ratio: float = 0.30     # If eye distance is >30% larger than baseline
+
     # Alert Timing
     slouch_alert_delay_seconds: float = 5.0       # Sustained slouch duration before alert fires
     alert_repeat_interval_seconds: float = 10.0   # Repeat alert interval if user remains slouched
