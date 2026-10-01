@@ -500,19 +500,19 @@ class PostureEngine:
             self.config.shoulder_tilt_threshold_deg = 8.0
             self.config.head_tilt_threshold_deg = 10.0
             self.config.forward_lean_threshold = 0.20
-            self.config.eye_distance_threshold_ratio = 0.30
+            self.config.eye_distance_threshold_ratio = 0.15
         elif level == "low":
             self.config.neck_ratio_drop_threshold = 0.25
             self.config.shoulder_tilt_threshold_deg = 18.0
             self.config.head_tilt_threshold_deg = 20.0
             self.config.forward_lean_threshold = 0.40
-            self.config.eye_distance_threshold_ratio = 0.55
+            self.config.eye_distance_threshold_ratio = 0.28
         else:  # Medium default
             self.config.neck_ratio_drop_threshold = 0.18
             self.config.shoulder_tilt_threshold_deg = 12.0
             self.config.head_tilt_threshold_deg = 14.0
             self.config.forward_lean_threshold = 0.30
-            self.config.eye_distance_threshold_ratio = 0.40
+            self.config.eye_distance_threshold_ratio = 0.20
 
     def close(self) -> None:
         """Releases MediaPipe and memory resources cleanly."""

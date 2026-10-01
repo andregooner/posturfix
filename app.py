@@ -747,8 +747,8 @@ class PostureApp(ctk.CTk):
                 return  # Within 2-minute (120s) cooldown window
             self._last_eye_toast_time = now
 
-        title = "PosturFix • Eye Protection"
-        message = "Your face is too close to the screen! Please lean back to protect your eyes."
+        title = "PosturFix • Eye Distance Alert (50cm)"
+        message = "Your face is closer than 50cm to the screen! Please lean back to protect your eyes."
         self._dispatch_native_toast(title, message)
 
     def trigger_posture_toast(self, metrics: PostureMetrics) -> None:
@@ -912,7 +912,7 @@ class PostureApp(ctk.CTk):
 
         self.eye_alert_switch = ctk.CTkSwitch(
             v_ctrls,
-            text="Eye Protection Alert",
+            text="Eye Distance Alert (50cm limit)",
             command=self._on_eye_alert_toggle,
         )
         if self.config.eye_distance_warning_enabled:
@@ -976,7 +976,7 @@ class PostureApp(ctk.CTk):
 
         self.calib_hint = ctk.CTkLabel(
             calib_card,
-            text="Sit comfortably straight looking at your screen, then click Calibrate.",
+            text="Sit straight and keep your face 50-55 cm (an arm's length) away from the screen, then click Calibrate.",
             font=ctk.CTkFont(size=11),
             wraplength=290,
             text_color="gray",
@@ -1518,9 +1518,9 @@ class PostureApp(ctk.CTk):
         reason_text = metrics.slouch_reason or "All posture metrics normal."
         if self.config.eye_distance_warning_enabled and metrics.is_screen_too_close_sustained:
             if reason_text in ("All posture metrics normal.", "Good posture maintained"):
-                reason_text = "Face too close to screen for >15s. Please lean back."
+                reason_text = "Face closer than 50cm for >15s. Please lean back."
             else:
-                reason_text += " • Face too close (>15s)"
+                reason_text += " • Face closer than 50cm (>15s)"
         self.reason_badge.configure(text=reason_text)
 
         # Slouch Timer

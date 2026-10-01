@@ -31,7 +31,7 @@ class PostureConfig:
 
     # Eye-to-Screen Distance (Screen Proximity / Eye Strain Warning) - Isolated System
     eye_distance_warning_enabled: bool = True
-    eye_distance_threshold_ratio: float = 0.40     # Less sensitive: >40% larger than baseline (genuinely too close)
+    eye_distance_threshold_ratio: float = 0.20     # Target 50-55cm: >20% increase in eye distance means face is < ~42cm
     eye_distance_buffer_seconds: float = 15.0      # 15s consecutive buffer before triggering alert
     eye_toast_cooldown_seconds: float = 120.0      # 2-minute cooldown timer exclusively for eye distance alert
 
