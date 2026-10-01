@@ -740,7 +740,7 @@ class PostureApp(ctk.CTk):
     def trigger_slouch_toast(self, metrics: PostureMetrics) -> None:
         """
         Fires an asynchronous, non-blocking native OS toast notification for posture slouching.
-        Protected by its own dedicated 25s cooldown timer. Completely isolated from eye distance alerts.
+        Triggered strictly when the slouch duration reaches 5 seconds, synchronized with the sound alert.
         """
         if not self.config.toast_notification_enabled:
             return
@@ -748,7 +748,7 @@ class PostureApp(ctk.CTk):
         now = time.time()
         with self._slouch_toast_lock:
             if (now - self._last_slouch_toast_time) < self.config.toast_cooldown_seconds:
-                return  # Within 25s cooldown window
+                return  # Within cooldown window
             self._last_slouch_toast_time = now
 
         title = self.config.toast_title
@@ -1415,8 +1415,14 @@ class PostureApp(ctk.CTk):
                 if self.config.sedentary_reminder_enabled and self.sitting_seconds >= target_seconds:
                     self.after(0, self.trigger_sedentary_alert)
 
-                # 1. Independent Posture Slouching Toast Notification (5s sustained slouch, 25s cooldown)
-                if metrics.state in (PostureState.WARNING, PostureState.SLOUCHING):
+                # Reset slouch toast cooldown if user has returned to good posture
+                if metrics.state == PostureState.GOOD:
+                    with self._slouch_toast_lock:
+                        self._last_slouch_toast_time = 0.0
+
+                # 1. Independent Posture Slouching Toast Notification:
+                # Triggered strictly when slouch timer reaches 5 seconds (synchronized with audio alert)
+                if metrics.state == PostureState.SLOUCHING and metrics.alert_fired:
                     self.trigger_slouch_toast(metrics)
 
                 # 2. Independent Eye-to-Screen Distance Alert (15s consecutive buffer, 2-minute cooldown)
@@ -1448,8 +1454,12 @@ class PostureApp(ctk.CTk):
                     delay = 0.08 if self.engine.calibrating else 0.05
                     time.sleep(delay)
                 else:
-                    # When hidden in tray, sleep for the 3-second interval
-                    time.sleep(0.1 if is_calibrating else interval)
+                    # When hidden in tray, sleep for interval (or adjust sleep to hit 5.0s slouch check precisely)
+                    if metrics.state == PostureState.WARNING and metrics.slouch_duration > 0:
+                        rem = max(0.5, self.config.slouch_alert_delay_seconds - metrics.slouch_duration)
+                        time.sleep(min(interval, rem))
+                    else:
+                        time.sleep(0.1 if is_calibrating else interval)
 
             except Exception as e:
                 import traceback

@@ -44,7 +44,7 @@ class PostureConfig:
 
     # Visual Toast Notifications (Pop-out for silent environments)
     toast_notification_enabled: bool = True
-    toast_cooldown_seconds: float = 25.0          # Minimum seconds between posture slouch toasts (25s)
+    toast_cooldown_seconds: float = 10.0          # Synced with alert repeat interval (10s)
     toast_app_name: str = "PosturFix"
     toast_title: str = "PosturFix Alert"
 

@@ -57,6 +57,7 @@ class PostureMetrics:
     is_calibrated: bool = False
     calibration_progress: float = 0.0
     session_good_posture_percentage: float = 100.0
+    alert_fired: bool = False                     # True strictly when 5s slouch threshold triggers alert
 
 
 class PostureEngine:
@@ -404,12 +405,14 @@ class PostureEngine:
                 if (now - self._last_alert_time) >= self.config.alert_repeat_interval_seconds:
                     self._play_alert_sound()
                     self._last_alert_time = now
+                    metrics.alert_fired = True
             else:
                 metrics.state = PostureState.WARNING
         else:
             self._slouch_start_time = None
             metrics.slouch_duration = 0.0
             metrics.state = PostureState.GOOD
+            self._last_alert_time = 0.0
 
         self._last_state = metrics.state
 
