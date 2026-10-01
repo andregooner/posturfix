@@ -24,17 +24,24 @@ Rather than relying on brittle raw pixel coordinates that break when you shift i
    When you sit upright, this ratio is at its maximum. When your head drops forward or you slouch, this ratio decreases significantly.
 3. **Lateral Shoulder & Head Tilt:** Angles relative to horizontal are monitored to detect asymmetric leaning to one side.
 4. **Lean Proximity:** Expansions in shoulder width relative to baseline detect excessive forward hunching toward the monitor.
-5. **👁️ Eye-to-Screen Distance Warning:** To prevent eye strain without loading heavy 3D face models, PosturFix calculates the Euclidean distance between `LEFT_EYE` and `RIGHT_EYE` landmarks from `mp_pose`. If the distance expands >30% over baseline, a *"Screen Too Close / Lean Back"* warning triggers immediately.
-6. **Debounce & Alert Timing:** To prevent false alarms from natural micro-movements, poor posture must be sustained for **more than 5.0 seconds** before triggering an alert.
-7. **One-Click Calibration:** Simply sit comfortably upright looking at your monitor and click **"Calibrate Posture"**. The engine averages stable frames to construct your personalized ergonomic baseline.
+5. **👁️ Eye-to-Screen Distance Alert (50cm Limit):** To prevent digital eye strain without loading heavy 3D face meshes, PosturFix calculates Euclidean distance between `LEFT_EYE` and `RIGHT_EYE` landmarks from `mp_pose`:
+   - **Ergonomic Baseline:** During calibration, users set their baseline at **50–55 cm (an arm's length)** from the screen.
+   - **Threshold:** If eye distance expands >20% over baseline (indicating face is closer than ~42cm), a consecutive timer starts.
+   - **15-Second Buffer:** Only fires a native toast if the user stays closer than 50cm for **15 consecutive seconds**. Momentary leans (e.g. reading small text for 5 seconds) reset the timer immediately when leaning back.
+   - **UI Toggle:** Dedicated `"Eye Distance Alert (50cm limit)"` switch in the UI allows turning this feature on/off independently without affecting core posture tracking.
+   - **2-Minute Cooldown:** Has an exclusive 120-second cooldown timer to prevent notification spam.
+6. **Debounce & Alert Timing (Main Posture):** To prevent false alarms from natural micro-movements, poor posture slouching must be sustained for **more than 5.0 seconds** before triggering an alert.
+7. **Ergonomic Calibration:** Sit straight with your face 50–55 cm (an arm's length) away from the monitor and click **"Calibrate Posture"**. The engine averages stable frames to construct your personalized ergonomic baseline.
 
 ---
 
 ## 🔔 Native System Notifications & Audio Alerts
 
 - **Pure Native OS Toast:** Displays Windows 10/11 system notifications in the bottom-right Action Center (`winotify`).
-- **Asynchronous & Non-Blocking:** Dispatched on separate daemon threads to guarantee 0% hitching or delay to camera and posture loops.
-- **Notification Cooldown:** Built-in 25-second cooldown timer prevents desktop pop-up spam.
+- **Asynchronous & Non-Blocking:** Dispatched on separate background daemon threads to guarantee 0% hitching or delay to camera and posture loops.
+- **Independent Cooldowns:** 
+  - Posture slouch toasts have a **25-second** cooldown.
+  - Eye distance toasts have a separate **2-minute (120s)** cooldown.
 - **Audio Chime:** Gentle audio alert tone that can be toggled on/off in the header.
 
 ---
