@@ -15,8 +15,10 @@ dist/
 *.spec.bak
 *.zip
 
-# Local configurations / logs
+# Local configurations / logs / licenses
 *.log
+*.key
+license.key
 .vscode/
 .idea/
 

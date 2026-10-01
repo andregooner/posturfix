@@ -26,6 +26,7 @@ import pystray
 
 from config import PostureConfig
 from posture_engine import PostureEngine, PostureState, PostureMetrics
+import license_manager
 
 
 def get_or_create_placeholder_icon(icon_size: int = 64) -> Image.Image:
@@ -359,6 +360,10 @@ class PostureApp(ctk.CTk):
         except Exception:
             pass
 
+        # Gatekeeper: 100% Offline License Verification
+        self.is_licensed = license_manager.is_license_valid()
+        self._activation_window: Optional[license_manager.ActivationWindow] = None
+
         # Build UI Layout
         self._build_header()
         self._build_body()
@@ -367,15 +372,33 @@ class PostureApp(ctk.CTk):
         # Intercept Window Close ('X' button) to minimize to tray
         self.protocol("WM_DELETE_WINDOW", self.hide_to_tray)
 
-        # Initialize System Tray
-        self._setup_system_tray()
-
-        # Start Camera Processing
-        self.start_camera()
-
-        # Start hidden in background tray by default
-        if start_hidden:
+        if not self.is_licensed:
+            # Block main UI & camera processing until valid license key is entered
             self.withdraw()
+            self._activation_window = license_manager.ActivationWindow(
+                parent=self,
+                on_success_callback=self._on_activation_success,
+                on_close_callback=self.quit_application,
+            )
+        else:
+            # Valid local validation token exists -> Bypass activation and run 100% offline
+            self._setup_system_tray()
+            self.start_camera()
+            if start_hidden:
+                self.withdraw()
+
+    def _on_activation_success(self, key: str):
+        """Callback executed when first-time license activation succeeds."""
+        self.is_licensed = True
+        if hasattr(self, "privacy_badge"):
+            self.privacy_badge.configure(
+                text=" [100% OFFLINE • LICENSED] ",
+                text_color="#10B981",
+                fg_color=("#D1FAE5", "#064E3B"),
+            )
+        self._setup_system_tray()
+        self.start_camera()
+        self.show_window()
 
     def _setup_system_tray(self):
         """Initializes the background system tray icon and context menu."""
@@ -809,15 +832,15 @@ class PostureApp(ctk.CTk):
         )
         title_lbl.pack(side="left")
 
-        privacy_badge = ctk.CTkLabel(
+        self.privacy_badge = ctk.CTkLabel(
             title_box,
-            text=" [100% OFFLINE • ZERO TELEMETRY] ",
+            text=" [100% OFFLINE • LICENSED] " if self.is_licensed else " [100% OFFLINE • ZERO TELEMETRY] ",
             font=ctk.CTkFont(size=11, weight="bold"),
             text_color="#10B981",
             fg_color=("#D1FAE5", "#064E3B"),
             corner_radius=6,
         )
-        privacy_badge.pack(side="left", padx=(12, 0))
+        self.privacy_badge.pack(side="left", padx=(12, 0))
 
         header_ctrls = ctk.CTkFrame(header_frame, fg_color="transparent")
         header_ctrls.pack(side="right", padx=20, pady=10)
