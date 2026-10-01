@@ -344,9 +344,11 @@ class PostureApp(ctk.CTk):
         self._away_start_time: Optional[float] = None
         self._last_posture_check: float = 0.0
 
-        # Visual Pop-out Toast Notification Cooldown Tracking
-        self._last_toast_time: float = 0.0
-        self._toast_lock = threading.Lock()
+        # Visual Pop-out Toast Notification Cooldown Tracking (Isolated Systems)
+        self._last_slouch_toast_time: float = 0.0
+        self._slouch_toast_lock = threading.Lock()
+        self._last_eye_toast_time: float = 0.0
+        self._eye_toast_lock = threading.Lock()
 
         # Load Icon
         self.app_icon = get_or_create_placeholder_icon()
@@ -639,11 +641,8 @@ class PostureApp(ctk.CTk):
         self.sitting_seconds = 0.0
         self._away_start_time = None
 
-    def _format_toast_message(self, metrics: PostureMetrics) -> str:
-        """Generates dynamic, informative message for the visual toast notification."""
-        if metrics.is_screen_too_close:
-            return "Your face is too close to the screen! Please lean back to protect your eyes."
-
+    def _format_slouch_message(self, metrics: PostureMetrics) -> str:
+        """Generates dynamic, informative message for the posture slouching toast notification."""
         reason = metrics.slouch_reason.lower() if metrics.slouch_reason else ""
         if "neck" in reason:
             return "You are slouching! Please sit up straight and lift your neck."
@@ -656,29 +655,11 @@ class PostureApp(ctk.CTk):
         else:
             return "You are slouching! Please sit up straight."
 
-    def trigger_posture_toast(self, metrics: PostureMetrics) -> None:
+    def _dispatch_native_toast(self, title: str, message: str) -> None:
         """
-        Fires an asynchronous, non-blocking native OS pop-out toast notification
-        when slouching or screen proximity is detected.
-        Guarantees:
-        - Asynchronous / daemon thread: NEVER blocks or delays the 3-second camera checking interval.
-        - Cooldown mechanism: limits toast frequency to once per cooldown window (default 25s).
-        - Primary: cross-platform plyer.notification.notify.
-        - Fallback: native Windows authenticated tray notification via pystray.
+        Asynchronously delivers native Windows Action Center or Tray notification in a background daemon thread.
+        Guarantees zero blocking of the camera loop or GUI thread.
         """
-        if not self.config.toast_notification_enabled:
-            return
-
-        now = time.time()
-        with self._toast_lock:
-            if (now - self._last_toast_time) < self.config.toast_cooldown_seconds:
-                return  # Within cooldown window; suppress to prevent desktop spam
-            self._last_toast_time = now
-
-        title = self.config.toast_title
-        message = self._format_toast_message(metrics)
-
-        # Asynchronous Native OS Action Center Notification (runs in background daemon thread)
         def _toast_worker():
             delivered = False
 
@@ -732,6 +713,47 @@ class PostureApp(ctk.CTk):
             daemon=True,
             name="PosturFix-NativeToastWorker",
         ).start()
+
+    def trigger_slouch_toast(self, metrics: PostureMetrics) -> None:
+        """
+        Fires an asynchronous, non-blocking native OS toast notification for posture slouching.
+        Protected by its own dedicated 25s cooldown timer. Completely isolated from eye distance alerts.
+        """
+        if not self.config.toast_notification_enabled:
+            return
+
+        now = time.time()
+        with self._slouch_toast_lock:
+            if (now - self._last_slouch_toast_time) < self.config.toast_cooldown_seconds:
+                return  # Within 25s cooldown window
+            self._last_slouch_toast_time = now
+
+        title = self.config.toast_title
+        message = self._format_slouch_message(metrics)
+        self._dispatch_native_toast(title, message)
+
+    def trigger_eye_distance_toast(self, metrics: PostureMetrics) -> None:
+        """
+        Fires an asynchronous native OS toast alert specifically for eye protection.
+        Protected by an exclusive 2-minute (120s) cooldown timer and 15s consecutive buffer.
+        Completely isolated from posture slouching alerts.
+        """
+        if not self.config.toast_notification_enabled or not self.config.eye_distance_warning_enabled:
+            return
+
+        now = time.time()
+        with self._eye_toast_lock:
+            if (now - self._last_eye_toast_time) < self.config.eye_toast_cooldown_seconds:
+                return  # Within 2-minute (120s) cooldown window
+            self._last_eye_toast_time = now
+
+        title = "PosturFix • Eye Protection"
+        message = "Your face is too close to the screen! Please lean back to protect your eyes."
+        self._dispatch_native_toast(title, message)
+
+    def trigger_posture_toast(self, metrics: PostureMetrics) -> None:
+        """Backward-compatible proxy pointing to trigger_slouch_toast."""
+        self.trigger_slouch_toast(metrics)
 
     def quit_application(self):
         """Stops background threads and exits cleanly."""
@@ -887,6 +909,15 @@ class PostureApp(ctk.CTk):
         )
         self.skeleton_switch.select()
         self.skeleton_switch.pack(side="left")
+
+        self.eye_alert_switch = ctk.CTkSwitch(
+            v_ctrls,
+            text="Eye Protection Alert",
+            command=self._on_eye_alert_toggle,
+        )
+        if self.config.eye_distance_warning_enabled:
+            self.eye_alert_switch.select()
+        self.eye_alert_switch.pack(side="left", padx=(15, 0))
 
         self.camera_status_lbl = ctk.CTkLabel(
             v_ctrls,
@@ -1361,13 +1392,17 @@ class PostureApp(ctk.CTk):
                 if self.config.sedentary_reminder_enabled and self.sitting_seconds >= target_seconds:
                     self.after(0, self.trigger_sedentary_alert)
 
-                # Trigger Visual Pop-out Toast Notification on Slouch or Screen Too Close (Non-blocking & Cooldown Protected)
+                # 1. Independent Posture Slouching Toast Notification (5s sustained slouch, 25s cooldown)
                 if metrics.state in (PostureState.WARNING, PostureState.SLOUCHING):
-                    self.trigger_posture_toast(metrics)
+                    self.trigger_slouch_toast(metrics)
+
+                # 2. Independent Eye-to-Screen Distance Alert (15s consecutive buffer, 2-minute cooldown)
+                if self.config.eye_distance_warning_enabled and metrics.is_screen_too_close_sustained:
+                    self.trigger_eye_distance_toast(metrics)
 
                 # Update tray tooltip dynamically
-                if metrics.is_screen_too_close:
-                    status_text = "ALERT: Screen Too Close / Lean Back!" if metrics.state == PostureState.SLOUCHING else "Warning: Screen Too Close"
+                if self.config.eye_distance_warning_enabled and metrics.is_screen_too_close_sustained:
+                    status_text = "ALERT: Screen Too Close / Lean Back!"
                 else:
                     status_text = {
                         PostureState.GOOD: "Good Posture",
@@ -1475,14 +1510,18 @@ class PostureApp(ctk.CTk):
         }
 
         title, text_color, _ = state_ui_map.get(state, ("UNKNOWN", "#9CA3AF", "#374151"))
-        if metrics.is_screen_too_close:
-            if state == PostureState.SLOUCHING:
-                title = "SCREEN TOO CLOSE / LEAN BACK!"
-            elif state == PostureState.WARNING:
-                title = "SCREEN TOO CLOSE / LEAN BACK"
+        if self.config.eye_distance_warning_enabled and metrics.is_screen_too_close_sustained:
+            title = "SCREEN TOO CLOSE / LEAN BACK!"
+            text_color = "#EF4444"
 
         self.status_badge.configure(text=title, text_color=text_color)
-        self.reason_badge.configure(text=metrics.slouch_reason or "All posture metrics normal.")
+        reason_text = metrics.slouch_reason or "All posture metrics normal."
+        if self.config.eye_distance_warning_enabled and metrics.is_screen_too_close_sustained:
+            if reason_text in ("All posture metrics normal.", "Good posture maintained"):
+                reason_text = "Face too close to screen for >15s. Please lean back."
+            else:
+                reason_text += " • Face too close (>15s)"
+        self.reason_badge.configure(text=reason_text)
 
         # Slouch Timer
         if state in (PostureState.WARNING, PostureState.SLOUCHING):
@@ -1551,6 +1590,11 @@ class PostureApp(ctk.CTk):
 
     def _on_toast_switch_toggle(self):
         self.config.toast_notification_enabled = self.toast_switch.get() == 1
+
+    def _on_eye_alert_toggle(self):
+        self.config.eye_distance_warning_enabled = self.eye_alert_switch.get() == 1
+        if not self.config.eye_distance_warning_enabled:
+            self.engine._eye_close_start_time = None
 
     def _on_break_interval_change(self, choice: str):
         try:

@@ -50,6 +50,8 @@ class PostureMetrics:
     eye_distance: float = 0.0
     baseline_eye_distance: float = 0.0
     is_screen_too_close: bool = False
+    is_screen_too_close_sustained: bool = False   # True ONLY after 15 consecutive seconds too close
+    eye_close_duration: float = 0.0              # Consecutive seconds face has been too close
     slouch_duration: float = 0.0
     slouch_reason: str = ""
     is_calibrated: bool = False
@@ -95,10 +97,13 @@ class PostureEngine:
         self.calibrating: bool = False
         self._calibration_samples: List[Dict[str, float]] = []
 
-        # Slouch timer & alert tracking
+        # Slouch timer & alert tracking (Pure Posture Logic)
         self._slouch_start_time: Optional[float] = None
         self._last_alert_time: float = 0.0
         self._last_state: PostureState = PostureState.NO_PERSON
+
+        # Isolated Eye-to-Screen Distance buffer tracking (15-second consecutive timer)
+        self._eye_close_start_time: Optional[float] = None
 
         # Session tracking statistics
         self._session_start_time = time.time()
@@ -113,11 +118,13 @@ class PostureEngine:
         """Initiates calibration routine."""
         self.calibrating = True
         self._calibration_samples.clear()
+        self._eye_close_start_time = None
 
     def cancel_calibration(self) -> None:
         """Cancels an in-progress calibration."""
         self.calibrating = False
         self._calibration_samples.clear()
+        self._eye_close_start_time = None
 
     @staticmethod
     def _calculate_angle(point_a: Tuple[float, float], point_b: Tuple[float, float]) -> float:
@@ -194,6 +201,7 @@ class PostureEngine:
         # If no pose landmarks are detected, immediately break out of calculation logic to save CPU
         if not results.pose_landmarks:
             self._slouch_start_time = None
+            self._eye_close_start_time = None
             metrics.state = PostureState.NO_PERSON
             self._last_state = metrics.state
             metrics.session_good_posture_percentage = self._compute_good_percentage()
@@ -223,6 +231,7 @@ class PostureEngine:
             metrics.state = PostureState.NO_PERSON
             metrics.slouch_reason = "Shoulders partially obstructed"
             self._slouch_start_time = None
+            self._eye_close_start_time = None
             return annotated_frame, metrics
 
         # Pixel Coordinates for geometric calculations
@@ -329,12 +338,19 @@ class PostureEngine:
         if head_tilt_diff > self.config.head_tilt_threshold_deg:
             reasons.append(f"Head tilt ({int(head_tilt_diff)}°)")
 
-        # 4. Leaning excessively forward into the screen (Shoulder width check)
+        # 4. Leaning excessively forward into the screen (Torso forward hunch check)
         width_expansion = (shoulder_width - self.baseline_shoulder_width) / max(0.001, self.baseline_shoulder_width)
         if width_expansion > self.config.forward_lean_threshold:
             reasons.append("Leaning too close to screen")
 
-        # 5. Eye-to-Screen Distance (Screen Proximity / Eye Strain Prevention)
+        # Main Posture Slouching Assessment (100% Independent from Eye Proximity)
+        is_slouching = len(reasons) > 0
+        metrics.slouch_reason = ", ".join(reasons) if is_slouching else "Good posture maintained"
+
+        # -------------------------------------------------------------
+        # ISOLATED Eye-to-Screen Distance (Screen Proximity / Eye Protection)
+        # 15-second consecutive trigger buffer. Zero interference with slouching.
+        # -------------------------------------------------------------
         if (
             self.config.eye_distance_warning_enabled
             and self.baseline_eye_distance > 1.0
@@ -343,11 +359,29 @@ class PostureEngine:
         ):
             eye_expansion = (eye_distance - self.baseline_eye_distance) / self.baseline_eye_distance
             if eye_expansion > self.config.eye_distance_threshold_ratio:
-                reasons.append(f"Screen Too Close / Lean Back ({int(eye_expansion * 100)}% closer)")
                 metrics.is_screen_too_close = True
+                if self._eye_close_start_time is None:
+                    self._eye_close_start_time = now
 
-        is_slouching = len(reasons) > 0
-        metrics.slouch_reason = ", ".join(reasons) if is_slouching else "Good posture maintained"
+                eye_elapsed = now - self._eye_close_start_time
+                metrics.eye_close_duration = eye_elapsed
+
+                # Only marked as sustained if face stays too close for 15 straight seconds
+                if eye_elapsed >= self.config.eye_distance_buffer_seconds:
+                    metrics.is_screen_too_close_sustained = True
+                else:
+                    metrics.is_screen_too_close_sustained = False
+            else:
+                # User leaned back -> reset 15-second timer immediately
+                self._eye_close_start_time = None
+                metrics.is_screen_too_close = False
+                metrics.is_screen_too_close_sustained = False
+                metrics.eye_close_duration = 0.0
+        else:
+            self._eye_close_start_time = None
+            metrics.is_screen_too_close = False
+            metrics.is_screen_too_close_sustained = False
+            metrics.eye_close_duration = 0.0
 
         # Update Session Posture Statistics
         self._total_monitored_time += dt
@@ -466,19 +500,19 @@ class PostureEngine:
             self.config.shoulder_tilt_threshold_deg = 8.0
             self.config.head_tilt_threshold_deg = 10.0
             self.config.forward_lean_threshold = 0.20
-            self.config.eye_distance_threshold_ratio = 0.20
+            self.config.eye_distance_threshold_ratio = 0.30
         elif level == "low":
             self.config.neck_ratio_drop_threshold = 0.25
             self.config.shoulder_tilt_threshold_deg = 18.0
             self.config.head_tilt_threshold_deg = 20.0
             self.config.forward_lean_threshold = 0.40
-            self.config.eye_distance_threshold_ratio = 0.40
+            self.config.eye_distance_threshold_ratio = 0.55
         else:  # Medium default
             self.config.neck_ratio_drop_threshold = 0.18
             self.config.shoulder_tilt_threshold_deg = 12.0
             self.config.head_tilt_threshold_deg = 14.0
             self.config.forward_lean_threshold = 0.30
-            self.config.eye_distance_threshold_ratio = 0.30
+            self.config.eye_distance_threshold_ratio = 0.40
 
     def close(self) -> None:
         """Releases MediaPipe and memory resources cleanly."""

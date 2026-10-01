@@ -29,11 +29,13 @@ class PostureConfig:
     head_tilt_threshold_deg: float = 14.0         # Max head tilt deviation in degrees
     forward_lean_threshold: float = 0.30          # Shoulder width increase >30% means leaning into screen
 
-    # Eye-to-Screen Distance (Screen Proximity / Eye Strain Warning)
+    # Eye-to-Screen Distance (Screen Proximity / Eye Strain Warning) - Isolated System
     eye_distance_warning_enabled: bool = True
-    eye_distance_threshold_ratio: float = 0.30     # If eye distance is >30% larger than baseline
+    eye_distance_threshold_ratio: float = 0.40     # Less sensitive: >40% larger than baseline (genuinely too close)
+    eye_distance_buffer_seconds: float = 15.0      # 15s consecutive buffer before triggering alert
+    eye_toast_cooldown_seconds: float = 120.0      # 2-minute cooldown timer exclusively for eye distance alert
 
-    # Alert Timing
+    # Slouch Alert Timing (Main Posture Logic - Fully Independent)
     slouch_alert_delay_seconds: float = 5.0       # Sustained slouch duration before alert fires
     alert_repeat_interval_seconds: float = 10.0   # Repeat alert interval if user remains slouched
     audio_alert_enabled: bool = True
@@ -42,7 +44,7 @@ class PostureConfig:
 
     # Visual Toast Notifications (Pop-out for silent environments)
     toast_notification_enabled: bool = True
-    toast_cooldown_seconds: float = 25.0          # Minimum seconds between visual toasts to prevent desktop spam
+    toast_cooldown_seconds: float = 25.0          # Minimum seconds between posture slouch toasts (25s)
     toast_app_name: str = "PosturFix"
     toast_title: str = "PosturFix Alert"
 
