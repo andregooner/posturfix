@@ -49,6 +49,7 @@ exe = EXE(
     target_arch=None,
     codesign_identity=None,
     entitlements_file=None,
+    icon=['C:/Users/claim1/Documents/subfolderx/New folder/assets/icon.ico'],
 )
 coll = COLLECT(
     exe,
