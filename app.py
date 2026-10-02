@@ -576,6 +576,7 @@ class PostureApp(ctk.CTk):
                     pystray.MenuItem("Sound Alert", self._on_tray_toggle_audio, checked=lambda item: self.config.audio_alert_enabled),
                     pystray.MenuItem("Desktop Toast Notifications", self._on_tray_toggle_toast, checked=lambda item: self.config.toast_notification_enabled),
                     pystray.MenuItem("Eye Distance Alert (50cm)", self._on_tray_toggle_eye_alert, checked=lambda item: self.config.eye_distance_warning_enabled),
+                    pystray.MenuItem("Smart Break Reminder", self._on_tray_toggle_break_reminder, checked=lambda item: self.config.sedentary_reminder_enabled),
                     pystray.Menu.SEPARATOR,
                     pystray.MenuItem("Start on System Startup", self._on_tray_toggle_autostart, checked=lambda item: self.is_autostart_active()),
                 ),
@@ -629,6 +630,20 @@ class PostureApp(ctk.CTk):
     def _on_tray_toggle_eye_alert(self, icon=None, item=None):
         """Thread-safe callback to toggle eye distance alert from tray."""
         self.after(0, self._toggle_eye_alert)
+
+    def _on_tray_toggle_break_reminder(self, icon=None, item=None):
+        """Thread-safe callback to toggle smart break reminder from tray."""
+        self.after(0, self._toggle_break_reminder)
+
+    def _toggle_break_reminder(self):
+        """Toggles the smart break reminder from system tray or shortcut."""
+        self.config.sedentary_reminder_enabled = not self.config.sedentary_reminder_enabled
+        if hasattr(self, "break_toggle_switch"):
+            if self.config.sedentary_reminder_enabled:
+                self.break_toggle_switch.select()
+            else:
+                self.break_toggle_switch.deselect()
+            self._on_break_toggle()
 
     def _on_tray_reset_break_timer(self, icon=None, item=None):
         """Thread-safe callback to reset break timer from system tray."""
@@ -903,21 +918,28 @@ class PostureApp(ctk.CTk):
 
     def trigger_sedentary_alert(self):
         """Fires native OS desktop notification and auto-resets break timer."""
-        title = self.config.sedentary_notification_title
-        message = self.config.sedentary_notification_message
+        interval_mins = self.config.sedentary_interval_minutes
+        if interval_mins == 60:
+            duration_text = "an hour"
+        elif interval_mins == 120:
+            duration_text = "2 hours"
+        else:
+            duration_text = f"{interval_mins} minutes"
 
-        # Native OS Desktop Notification via pystray
-        if hasattr(self, "tray_icon") and self.tray_icon:
-            try:
-                self.tray_icon.notify(message, title)
-            except Exception:
-                pass
+        title = "💧 Hydration Break!"
+        message = (
+            f"💧 Hydration Break! You've been sitting continuously for {duration_text}. "
+            "Stand up, stretch your back, and drink a glass of water."
+        )
+
+        # Multi-backend native OS toast notification (Action Center, pystray, plyer)
+        self._dispatch_native_toast(title, message)
 
         # Audio chime alert
         if self.config.audio_alert_enabled:
             self.engine._play_alert_sound()
 
-        # Automatically reset sitting timer after alert is delivered
+        # Automatically reset continuous sitting timer after alert is delivered
         self.sitting_seconds = 0.0
         self._away_start_time = None
 
@@ -1278,26 +1300,70 @@ class PostureApp(ctk.CTk):
         self.calib_progress_bar.configure(progress_color="#3B82F6")
         self.calib_progress_bar.pack(fill="x", padx=15, pady=(0, 12))
 
-        # 4. Sedentary Reminder / Break Timer Card
+        # 4. Smart Hydration & Break Reminder Card
         break_card = ctk.CTkFrame(right_panel, corner_radius=10, fg_color=("gray85", "#27272A"))
         break_card.pack(fill="x", padx=10, pady=6)
 
         break_header = ctk.CTkFrame(break_card, fg_color="transparent")
-        break_header.pack(fill="x", padx=15, pady=(10, 2))
+        break_header.pack(fill="x", padx=15, pady=(10, 4))
 
-        break_title = ctk.CTkLabel(break_header, text="SEDENTARY BREAK TIMER", font=ctk.CTkFont(size=11, weight="bold"), text_color="gray")
+        break_title = ctk.CTkLabel(
+            break_header,
+            text="SMART HYDRATION & BREAK REMINDER",
+            font=ctk.CTkFont(size=11, weight="bold"),
+            text_color="gray",
+        )
         break_title.pack(side="left")
 
+        # 1. Enable / Disable Toggle Switch
+        break_toggle_row = ctk.CTkFrame(break_card, fg_color="transparent")
+        break_toggle_row.pack(fill="x", padx=15, pady=(2, 6))
+
+        self.break_toggle_switch = ctk.CTkSwitch(
+            break_toggle_row,
+            text="Enable Smart Break Reminder",
+            font=ctk.CTkFont(size=12, weight="bold"),
+            command=self._on_break_toggle,
+        )
+        if self.config.sedentary_reminder_enabled:
+            self.break_toggle_switch.select()
+        else:
+            self.break_toggle_switch.deselect()
+        self.break_toggle_switch.pack(side="left")
+
+        # 2. Break Interval Selection Dropdown (45m, 60m, 90m, 120m)
+        interval_row = ctk.CTkFrame(break_card, fg_color="transparent")
+        interval_row.pack(fill="x", padx=15, pady=(0, 6))
+
+        interval_lbl = ctk.CTkLabel(
+            interval_row,
+            text="Break Interval:",
+            font=ctk.CTkFont(size=12),
+            text_color=("gray20", "gray80"),
+        )
+        interval_lbl.pack(side="left")
+
         self.break_interval_menu = ctk.CTkOptionMenu(
-            break_header,
-            values=["30m", "45m", "60m", "90m"],
-            width=70,
-            height=22,
+            interval_row,
+            values=["45 mins", "60 mins", "90 mins", "120 mins"],
+            width=100,
+            height=26,
             font=ctk.CTkFont(size=11),
             command=self._on_break_interval_change,
         )
-        self.break_interval_menu.set(f"{self.config.sedentary_interval_minutes}m")
+        self.break_interval_menu.set(f"{self.config.sedentary_interval_minutes} mins")
         self.break_interval_menu.pack(side="right")
+
+        # 3. Smart Presence Reset Hint
+        smart_hint_lbl = ctk.CTkLabel(
+            break_card,
+            text="• Smart Reset: Timer auto-resets if you stand up and leave desk for 3+ mins.",
+            font=ctk.CTkFont(size=11),
+            text_color="gray",
+            wraplength=290,
+            justify="left",
+        )
+        smart_hint_lbl.pack(anchor="w", padx=15, pady=(0, 6))
 
         self.break_timer_lbl = ctk.CTkLabel(
             break_card,
@@ -1305,7 +1371,7 @@ class PostureApp(ctk.CTk):
             font=ctk.CTkFont(size=13, weight="bold"),
             text_color="#3B82F6",
         )
-        self.break_timer_lbl.pack(anchor="w", padx=15, pady=(4, 4))
+        self.break_timer_lbl.pack(anchor="w", padx=15, pady=(0, 4))
 
         self.break_progress = ctk.CTkProgressBar(break_card, height=8)
         self.break_progress.set(0.0)
@@ -1947,21 +2013,39 @@ class PostureApp(ctk.CTk):
                 state="normal",
             )
 
-        # Sedentary Break Timer Progress
+        # Smart Hydration & Break Timer Progress
         sitting_mins = int(self.sitting_seconds // 60)
         sitting_secs = int(self.sitting_seconds % 60)
         target_mins = self.config.sedentary_interval_minutes
         target_secs = target_mins * 60.0
         break_fraction = min(1.0, max(0.0, self.sitting_seconds / target_secs))
 
-        self.break_timer_lbl.configure(text=f"Active Sitting: {sitting_mins}m {sitting_secs:02d}s / {target_mins}m")
-        self.break_progress.set(break_fraction)
-        if break_fraction >= 0.9:
-            self.break_progress.configure(progress_color="#EF4444")
-        elif break_fraction >= 0.7:
-            self.break_progress.configure(progress_color="#F59E0B")
+        if self.config.sedentary_reminder_enabled:
+            if self._away_start_time is not None:
+                away_elapsed = int(time.time() - self._away_start_time)
+                away_rem = max(0, int(self.config.sedentary_auto_reset_away_seconds - away_elapsed))
+                self.break_timer_lbl.configure(
+                    text=f"Active Sitting: {sitting_mins}m {sitting_secs:02d}s / {target_mins}m (Away: reset in {away_rem}s)",
+                    text_color="#9CA3AF",
+                )
+            else:
+                self.break_timer_lbl.configure(
+                    text=f"Active Sitting: {sitting_mins}m {sitting_secs:02d}s / {target_mins}m",
+                    text_color="#3B82F6",
+                )
+            self.break_progress.set(break_fraction)
+            if break_fraction >= 0.9:
+                self.break_progress.configure(progress_color="#EF4444")
+            elif break_fraction >= 0.7:
+                self.break_progress.configure(progress_color="#F59E0B")
+            else:
+                self.break_progress.configure(progress_color="#3B82F6")
         else:
-            self.break_progress.configure(progress_color="#3B82F6")
+            self.break_timer_lbl.configure(
+                text=f"Break Reminder: Disabled ({sitting_mins}m logged)",
+                text_color="gray",
+            )
+            self.break_progress.set(0.0)
 
         # Session Posture Score
         score = metrics.session_good_posture_percentage
@@ -1998,13 +2082,37 @@ class PostureApp(ctk.CTk):
         if not self.config.eye_distance_warning_enabled:
             self.engine._eye_close_start_time = None
 
+    def _on_break_toggle(self):
+        """Toggles the Smart Hydration & Break Reminder on or off."""
+        self.config.sedentary_reminder_enabled = self.break_toggle_switch.get() == 1
+        sitting_mins = int(self.sitting_seconds // 60)
+        sitting_secs = int(self.sitting_seconds % 60)
+        target_mins = self.config.sedentary_interval_minutes
+        if not self.config.sedentary_reminder_enabled:
+            self.break_timer_lbl.configure(
+                text=f"Break Reminder: Disabled ({sitting_mins}m logged)",
+                text_color="gray",
+            )
+            self.break_progress.set(0.0)
+        else:
+            self.break_timer_lbl.configure(
+                text=f"Active Sitting: {sitting_mins}m {sitting_secs:02d}s / {target_mins}m",
+                text_color="#3B82F6",
+            )
+            break_fraction = min(1.0, max(0.0, self.sitting_seconds / (target_mins * 60.0)))
+            self.break_progress.set(break_fraction)
+
     def _on_break_interval_change(self, choice: str):
         try:
-            mins = int(choice.replace("m", "").strip())
-            self.config.sedentary_interval_minutes = mins
-            sitting_mins = int(self.sitting_seconds // 60)
-            sitting_secs = int(self.sitting_seconds % 60)
-            self.break_timer_lbl.configure(text=f"Active Sitting: {sitting_mins}m {sitting_secs:02d}s / {mins}m")
+            mins = int("".join(filter(str.isdigit, choice)))
+            if mins > 0:
+                self.config.sedentary_interval_minutes = mins
+                sitting_mins = int(self.sitting_seconds // 60)
+                sitting_secs = int(self.sitting_seconds % 60)
+                if self.config.sedentary_reminder_enabled:
+                    self.break_timer_lbl.configure(text=f"Active Sitting: {sitting_mins}m {sitting_secs:02d}s / {mins}m")
+                    break_fraction = min(1.0, max(0.0, self.sitting_seconds / (mins * 60.0)))
+                    self.break_progress.set(break_fraction)
         except Exception:
             pass
 

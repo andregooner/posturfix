@@ -55,12 +55,15 @@ class PostureConfig:
     privacy_mode_default: bool = False            # If true, camera preview is hidden by default
     draw_skeleton: bool = True                    # Draw pose landmarks when camera preview is on
 
-    # Sedentary (Prolonged Sitting) Break Settings
+    # Smart Hydration & Break Reminder Settings
     sedentary_reminder_enabled: bool = True
-    sedentary_interval_minutes: int = 45          # Default 45 minutes
-    sedentary_notification_title: str = "PosturFix • Break Time!"
-    sedentary_notification_message: str = "Time to stand up! Take a 5-minute stretch break."
-    sedentary_auto_reset_away_seconds: float = 180.0  # Reset timer if user leaves desk for > 3 minutes
+    sedentary_interval_minutes: int = 60          # Default 60 minutes (1 hour continuous sitting)
+    sedentary_notification_title: str = "💧 Hydration Break!"
+    sedentary_notification_message: str = (
+        "💧 Hydration Break! You've been sitting continuously for an hour. "
+        "Stand up, stretch your back, and drink a glass of water."
+    )
+    sedentary_auto_reset_away_seconds: float = 180.0  # Reset timer if user is not detected for >= 3 consecutive minutes
 
     # Deep Sleep (OS Idle Detection Power Saving)
     deep_sleep_enabled: bool = True
