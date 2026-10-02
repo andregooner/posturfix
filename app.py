@@ -29,15 +29,27 @@ from posture_engine import PostureEngine, PostureState, PostureMetrics
 import license_manager
 
 
+def resource_path(relative_path: str) -> str:
+    """
+    Get absolute path to resource, works for dev and for PyInstaller bundle.
+    When bundled via PyInstaller, sys._MEIPASS holds the path to the temporary extraction directory.
+    """
+    try:
+        base_path = sys._MEIPASS
+    except AttributeError:
+        base_path = os.path.dirname(os.path.abspath(__file__))
+    return os.path.normpath(os.path.join(base_path, relative_path))
+
+
 def get_or_create_placeholder_icon(icon_size: int = 64) -> Image.Image:
     """
     Safely retrieves the application icon.
     If assets/icon.png does not exist, programmatically generates an aesthetic
     placeholder icon so the application never crashes.
     """
-    assets_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "assets")
-    png_path = os.path.join(assets_dir, "icon.png")
-    ico_path = os.path.join(assets_dir, "icon.ico")
+    assets_dir = resource_path("assets")
+    png_path = resource_path(os.path.join("assets", "icon.png"))
+    ico_path = resource_path(os.path.join("assets", "icon.ico"))
 
     if os.path.exists(png_path):
         try:
@@ -179,7 +191,7 @@ class MascotWidget(ctk.CTkFrame):
         self.speech_label.pack(pady=(0, 10), padx=10)
 
         # Asset directory check for custom user sprites
-        self.assets_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "assets", "mascot")
+        self.assets_dir = resource_path(os.path.join("assets", "mascot"))
         self._current_state = None
         self.draw_mascot(PostureState.NO_PERSON)
 
@@ -354,11 +366,13 @@ class PostureApp(ctk.CTk):
         # Load Icon
         self.app_icon = get_or_create_placeholder_icon()
         try:
-            ico_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "assets", "icon.ico")
+            ico_path = resource_path(os.path.join("assets", "icon.ico"))
             if os.path.exists(ico_path):
                 self.iconbitmap(ico_path)
         except Exception:
             pass
+
+        self._has_notified_camera_conflict: bool = False
 
         # Gatekeeper: 100% Offline License Verification
         self.is_licensed = license_manager.is_license_valid()
@@ -408,14 +422,23 @@ class PostureApp(ctk.CTk):
             pystray.MenuItem("Show Window", self._on_tray_show_window, default=True),
             pystray.MenuItem("Quick Calibrate", self._on_tray_quick_calibrate),
             pystray.Menu.SEPARATOR,
-            pystray.MenuItem("Pause for 30 Mins", self._on_tray_pause_30),
-            pystray.MenuItem("Pause for 1 Hour", self._on_tray_pause_60),
-            pystray.MenuItem("Resume", self._on_tray_resume, enabled=lambda item: self.is_snoozed()),
-            pystray.Menu.SEPARATOR,
+            pystray.MenuItem(
+                "Settings (Pause/Toggle Alerts)",
+                pystray.Menu(
+                    pystray.MenuItem("Pause for 30 Mins", self._on_tray_pause_30),
+                    pystray.MenuItem("Pause for 1 Hour", self._on_tray_pause_60),
+                    pystray.MenuItem("Resume Monitoring", self._on_tray_resume, enabled=lambda item: self.is_snoozed()),
+                    pystray.Menu.SEPARATOR,
+                    pystray.MenuItem("Sound Alert", self._on_tray_toggle_audio, checked=lambda item: self.config.audio_alert_enabled),
+                    pystray.MenuItem("Desktop Toast Notifications", self._on_tray_toggle_toast, checked=lambda item: self.config.toast_notification_enabled),
+                    pystray.MenuItem("Eye Distance Alert (50cm)", self._on_tray_toggle_eye_alert, checked=lambda item: self.config.eye_distance_warning_enabled),
+                    pystray.Menu.SEPARATOR,
+                    pystray.MenuItem("Start on System Startup", self._on_tray_toggle_autostart, checked=lambda item: self.is_autostart_active()),
+                ),
+            ),
             pystray.MenuItem("Reset Break Timer", self._on_tray_reset_break_timer),
-            pystray.MenuItem("Run on Startup", self._on_tray_toggle_autostart, checked=lambda item: self.is_autostart_active()),
             pystray.Menu.SEPARATOR,
-            pystray.MenuItem("Quit", self._on_tray_quit_app),
+            pystray.MenuItem("Quit/Exit", self._on_tray_quit_app),
         )
 
         self.tray_icon = pystray.Icon(
@@ -450,12 +473,24 @@ class PostureApp(ctk.CTk):
         """Thread-safe callback to resume monitoring from pause."""
         self.after(0, self.resume)
 
+    def _on_tray_toggle_audio(self, icon=None, item=None):
+        """Thread-safe callback to toggle sound alerts from tray."""
+        self.after(0, self._toggle_audio_alert)
+
+    def _on_tray_toggle_toast(self, icon=None, item=None):
+        """Thread-safe callback to toggle desktop toast notifications from tray."""
+        self.after(0, self._toggle_toast_notification)
+
+    def _on_tray_toggle_eye_alert(self, icon=None, item=None):
+        """Thread-safe callback to toggle eye distance alert from tray."""
+        self.after(0, self._toggle_eye_alert)
+
     def _on_tray_reset_break_timer(self, icon=None, item=None):
         """Thread-safe callback to reset break timer from system tray."""
         self.after(0, self.reset_break_timer)
 
     def _on_tray_toggle_autostart(self, icon=None, item=None):
-        """Thread-safe callback to toggle Windows startup entry."""
+        """Thread-safe callback to toggle system startup entry."""
         self.after(0, self.toggle_autostart)
 
     def _on_tray_quit_app(self, icon=None, item=None):
@@ -564,65 +599,138 @@ class PostureApp(ctk.CTk):
         self._snooze_event.set()
         self._camera_retry_event.set()
 
+    def _toggle_audio_alert(self):
+        """Toggles sound alert setting and synchronizes UI switch."""
+        self.config.audio_alert_enabled = not self.config.audio_alert_enabled
+        if hasattr(self, "audio_switch"):
+            if self.config.audio_alert_enabled:
+                self.audio_switch.select()
+            else:
+                self.audio_switch.deselect()
+
+    def _toggle_toast_notification(self):
+        """Toggles toast notification setting and synchronizes UI switch."""
+        self.config.toast_notification_enabled = not self.config.toast_notification_enabled
+        if hasattr(self, "toast_switch"):
+            if self.config.toast_notification_enabled:
+                self.toast_switch.select()
+            else:
+                self.toast_switch.deselect()
+
+    def _toggle_eye_alert(self):
+        """Toggles eye distance alert and synchronizes UI switch."""
+        self.config.eye_distance_warning_enabled = not self.config.eye_distance_warning_enabled
+        if hasattr(self, "eye_alert_switch"):
+            if self.config.eye_distance_warning_enabled:
+                self.eye_alert_switch.select()
+            else:
+                self.eye_alert_switch.deselect()
+
+    def _on_autostart_checkbox_toggle(self):
+        """Handler when user toggles the startup checkbox in UI."""
+        is_checked = self.autostart_checkbox.get() == 1
+        self.toggle_autostart(target_state=is_checked)
+
     def is_autostart_active(self) -> bool:
-        """Checks if PosturFix is configured to start on Windows boot."""
-        if sys.platform != "win32":
-            return False
-        try:
-            import winreg
-            reg_path = r"Software\Microsoft\Windows\CurrentVersion\Run"
-            with winreg.OpenKey(winreg.HKEY_CURRENT_USER, reg_path, 0, winreg.KEY_READ) as key:
-                winreg.QueryValueEx(key, "PosturFix")
-                return True
-        except Exception:
-            return False
+        """Checks if PosturFix is configured to start on Windows boot or macOS login."""
+        if sys.platform == "win32":
+            try:
+                import winreg
+                reg_path = r"Software\Microsoft\Windows\CurrentVersion\Run"
+                with winreg.OpenKey(winreg.HKEY_CURRENT_USER, reg_path, 0, winreg.KEY_READ) as key:
+                    winreg.QueryValueEx(key, "PosturFix")
+                    return True
+            except Exception:
+                return False
+        elif sys.platform == "darwin":
+            plist_path = os.path.expanduser("~/Library/LaunchAgents/com.posturfix.app.plist")
+            return os.path.exists(plist_path)
+        return False
 
-    def toggle_autostart(self):
-        """Adds or removes PosturFix from the Windows startup registry."""
-        if sys.platform != "win32":
-            return
-
+    def toggle_autostart(self, target_state: Optional[bool] = None):
+        """Adds or removes PosturFix from system startup (Windows Registry or macOS LaunchAgents)."""
         currently_enabled = self.is_autostart_active()
-        target_enabled = not currently_enabled
+        target_enabled = not currently_enabled if target_state is None else target_state
 
-        try:
-            import winreg
-            reg_path = r"Software\Microsoft\Windows\CurrentVersion\Run"
-            with winreg.OpenKey(winreg.HKEY_CURRENT_USER, reg_path, 0, winreg.KEY_SET_VALUE | winreg.KEY_READ) as key:
-                if target_enabled:
-                    if getattr(sys, "frozen", False):
-                        cmd = f'"{sys.executable}" --minimized'
+        msg = ""
+        title = ""
+
+        if sys.platform == "win32":
+            try:
+                import winreg
+                reg_path = r"Software\Microsoft\Windows\CurrentVersion\Run"
+                with winreg.OpenKey(winreg.HKEY_CURRENT_USER, reg_path, 0, winreg.KEY_SET_VALUE | winreg.KEY_READ) as key:
+                    if target_enabled:
+                        if getattr(sys, "frozen", False):
+                            cmd = f'"{sys.executable}" --minimized'
+                        else:
+                            python_dir = os.path.dirname(sys.executable)
+                            pythonw = os.path.join(python_dir, "pythonw.exe")
+                            if not os.path.exists(pythonw):
+                                pythonw = sys.executable
+                            app_file = os.path.abspath(__file__)
+                            cmd = f'"{pythonw}" "{app_file}" --minimized'
+
+                        winreg.SetValueEx(key, "PosturFix", 0, winreg.REG_SZ, cmd)
+                        msg = "PosturFix will now run automatically on system boot."
+                        title = "PosturFix • Run on Startup Enabled"
                     else:
-                        python_dir = os.path.dirname(sys.executable)
-                        pythonw = os.path.join(python_dir, "pythonw.exe")
-                        if not os.path.exists(pythonw):
-                            pythonw = sys.executable
-                        app_file = os.path.abspath(__file__)
-                        cmd = f'"{pythonw}" "{app_file}" --minimized'
+                        try:
+                            winreg.DeleteValue(key, "PosturFix")
+                        except FileNotFoundError:
+                            pass
+                        msg = "PosturFix removed from system startup."
+                        title = "PosturFix • Run on Startup Disabled"
+            except Exception as e:
+                msg = f"Could not update Windows startup registry: {e}"
+                title = "PosturFix Error"
 
-                    winreg.SetValueEx(key, "PosturFix", 0, winreg.REG_SZ, cmd)
-                    msg = "PosturFix will now run automatically on system boot."
+        elif sys.platform == "darwin":
+            plist_path = os.path.expanduser("~/Library/LaunchAgents/com.posturfix.app.plist")
+            try:
+                if target_enabled:
+                    os.makedirs(os.path.dirname(plist_path), exist_ok=True)
+                    app_exec = sys.executable
+                    plist_content = f"""<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.posturfix.app</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>{app_exec}</string>
+        <string>--minimized</string>
+    </array>
+    <key>RunAtLoad</key>
+    <true/>
+</dict>
+</plist>"""
+                    with open(plist_path, "w", encoding="utf-8") as f:
+                        f.write(plist_content)
+                    msg = "PosturFix configured to launch at macOS login."
                     title = "PosturFix • Run on Startup Enabled"
                 else:
-                    try:
-                        winreg.DeleteValue(key, "PosturFix")
-                    except FileNotFoundError:
-                        pass
-                    msg = "PosturFix removed from system startup."
+                    if os.path.exists(plist_path):
+                        os.remove(plist_path)
+                    msg = "PosturFix removed from macOS startup."
                     title = "PosturFix • Run on Startup Disabled"
+            except Exception as e:
+                msg = f"Could not update macOS LaunchAgents: {e}"
+                title = "PosturFix Error"
 
-            if hasattr(self, "tray_icon") and self.tray_icon:
-                try:
-                    self.tray_icon.notify(msg, title)
-                except Exception:
-                    pass
+        # Update UI Checkbox in Settings if exists
+        if hasattr(self, "autostart_checkbox"):
+            if self.is_autostart_active():
+                self.autostart_checkbox.select()
+            else:
+                self.autostart_checkbox.deselect()
 
-        except Exception as e:
-            if hasattr(self, "tray_icon") and self.tray_icon:
-                try:
-                    self.tray_icon.notify(f"Could not update startup setting: {e}", "PosturFix Error")
-                except Exception:
-                    pass
+        if hasattr(self, "tray_icon") and self.tray_icon:
+            try:
+                self.tray_icon.notify(msg, title)
+            except Exception:
+                pass
 
     def reset_break_timer(self, notify: bool = True):
         """Resets the continuous sitting timer to zero."""
@@ -687,10 +795,9 @@ class PostureApp(ctk.CTk):
             delivered = False
 
             # Resolve application icon path for native Windows toast banner
-            assets_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "assets")
-            icon_path = os.path.join(assets_dir, "icon.png")
+            icon_path = resource_path(os.path.join("assets", "icon.png"))
             if not os.path.exists(icon_path):
-                icon_path = os.path.join(assets_dir, "icon.ico")
+                icon_path = resource_path(os.path.join("assets", "icon.ico"))
             icon_arg = os.path.abspath(icon_path) if os.path.exists(icon_path) else ""
 
             # Attempt 1: Modern Windows 10/11 Action Center Toast via winotify (official OS notification)
@@ -1090,6 +1197,35 @@ class PostureApp(ctk.CTk):
         )
         self.score_desc_lbl.pack(anchor="w", padx=15, pady=(0, 10))
 
+        # 6. Desktop & System Settings Card
+        desktop_card = ctk.CTkFrame(right_panel, corner_radius=10, fg_color=("gray85", "#27272A"))
+        desktop_card.pack(fill="x", padx=10, pady=(6, 14))
+
+        desktop_title = ctk.CTkLabel(desktop_card, text="DESKTOP & SYSTEM SETTINGS", font=ctk.CTkFont(size=11, weight="bold"), text_color="gray")
+        desktop_title.pack(anchor="w", padx=15, pady=(10, 6))
+
+        self.autostart_checkbox = ctk.CTkCheckBox(
+            desktop_card,
+            text="Start PosturFix on system startup",
+            font=ctk.CTkFont(size=12),
+            command=self._on_autostart_checkbox_toggle,
+        )
+        if self.is_autostart_active():
+            self.autostart_checkbox.select()
+        else:
+            self.autostart_checkbox.deselect()
+        self.autostart_checkbox.pack(anchor="w", padx=15, pady=(0, 6))
+
+        minimize_hint = ctk.CTkLabel(
+            desktop_card,
+            text="Closing this window ('X') minimizes PosturFix to the System Tray so posture tracking continues uninterrupted.",
+            font=ctk.CTkFont(size=11),
+            text_color="gray",
+            wraplength=290,
+            justify="left",
+        )
+        minimize_hint.pack(anchor="w", padx=15, pady=(0, 10))
+
     def _build_footer(self):
         """Bottom Information Strip."""
         footer_frame = ctk.CTkFrame(self, height=32, corner_radius=0, fg_color=("gray92", "#121214"))
@@ -1278,13 +1414,21 @@ class PostureApp(ctk.CTk):
                         if hasattr(self, "tray_icon") and self.tray_icon:
                             self.tray_icon.title = "PosturFix: Camera in use by another app"
 
+                        conflict_msg = "Camera is in use by another app. PosturFix tracking is paused."
                         self.after(0, lambda: self.camera_status_lbl.configure(
-                            text="Camera in use by another app (Zoom/Meet)", text_color="#EF4444"
+                            text=conflict_msg, text_color="#EF4444"
                         ))
                         if is_visible:
                             self.after(0, lambda: self._render_privacy_screen(
-                                "Camera in use by another app\n(Zoom, Meet, or Teams)\nReconnecting automatically..."
+                                "Camera is in use by another app (Zoom, Meet, or Teams)\nPosturFix tracking is paused.\nReconnecting automatically..."
                             ))
+
+                        if not self._has_notified_camera_conflict:
+                            self._has_notified_camera_conflict = True
+                            self._dispatch_native_toast(
+                                "PosturFix Alert",
+                                conflict_msg,
+                            )
 
                         retry_sec = 3.0 if camera_error_streak <= 3 else 10.0
                         self._camera_retry_event.wait(timeout=retry_sec)
@@ -1293,6 +1437,16 @@ class PostureApp(ctk.CTk):
                     else:
                         camera_error_streak = 0
                         consecutive_read_failures = 0
+                        if self._has_notified_camera_conflict:
+                            self._has_notified_camera_conflict = False
+                            if hasattr(self, "tray_icon") and self.tray_icon:
+                                try:
+                                    self.tray_icon.notify(
+                                        "Camera reconnected! PosturFix tracking resumed.",
+                                        "PosturFix • Resumed",
+                                    )
+                                except Exception:
+                                    pass
                         self.after(0, lambda: self.camera_status_lbl.configure(
                             text=f"Camera: Connected ({self.config.frame_width}x{self.config.frame_height} Lite)",
                             text_color="#10B981"
@@ -1333,13 +1487,21 @@ class PostureApp(ctk.CTk):
                     if hasattr(self, "tray_icon") and self.tray_icon:
                         self.tray_icon.title = "PosturFix: Camera in use by another app"
 
+                    conflict_msg = "Camera is in use by another app. PosturFix tracking is paused."
                     self.after(0, lambda: self.camera_status_lbl.configure(
-                        text="Camera: Disconnected / In use by another app", text_color="#EF4444"
+                        text=conflict_msg, text_color="#EF4444"
                     ))
                     if is_visible:
                         self.after(0, lambda: self._render_privacy_screen(
-                            "Camera disconnected or seized by Zoom/Meet\nReconnecting automatically..."
+                            "Camera is in use by another app (Zoom, Meet, or Teams)\nPosturFix tracking is paused.\nReconnecting automatically..."
                         ))
+
+                    if not self._has_notified_camera_conflict:
+                        self._has_notified_camera_conflict = True
+                        self._dispatch_native_toast(
+                            "PosturFix Alert",
+                            conflict_msg,
+                        )
 
                     self._camera_retry_event.wait(timeout=3.0)
                     self._camera_retry_event.clear()

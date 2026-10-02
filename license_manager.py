@@ -33,6 +33,18 @@ def _get_machine_fingerprint() -> str:
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()[:16]
 
 
+def resource_path(relative_path: str) -> str:
+    """
+    Get absolute path to resource, works for dev and for PyInstaller bundle.
+    When bundled via PyInstaller, sys._MEIPASS holds the path to the temporary extraction directory.
+    """
+    try:
+        base_path = sys._MEIPASS
+    except AttributeError:
+        base_path = os.path.dirname(os.path.abspath(__file__))
+    return os.path.normpath(os.path.join(base_path, relative_path))
+
+
 def get_license_file_paths() -> List[str]:
     """Returns candidate paths for the license.key file in order of priority."""
     paths = []
@@ -43,7 +55,12 @@ def get_license_file_paths() -> List[str]:
         exe_dir = os.path.dirname(os.path.abspath(__file__))
     paths.append(os.path.join(exe_dir, "license.key"))
 
-    # 2. Local AppData directory (%LOCALAPPDATA%/PosturFix/license.key)
+    # 2. PyInstaller temporary bundle directory via sys._MEIPASS
+    bundled_key = resource_path("license.key")
+    if bundled_key not in paths:
+        paths.append(bundled_key)
+
+    # 3. Local AppData directory (%LOCALAPPDATA%/PosturFix/license.key)
     local_appdata = os.environ.get("LOCALAPPDATA") or os.environ.get("APPDATA") or os.path.expanduser("~")
     paths.append(os.path.join(local_appdata, "PosturFix", "license.key"))
 
