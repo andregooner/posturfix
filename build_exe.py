@@ -48,6 +48,7 @@ def build_executable():
         "--collect-all=pynput",           # Ensure global input hooks are included
         "--collect-all=plyer",            # Ensure notification backend is included
         "--collect-all=winotify",         # Ensure Windows 10/11 toast backend is included
+        f"--icon={os.path.join(assets_dir, 'icon.ico')}",
         f"--add-data={assets_dir};assets" if sys.platform == "win32" else f"--add-data={assets_dir}:assets",
         os.path.join(project_dir, "app.py"),
     ]
@@ -65,9 +66,16 @@ def build_executable():
         if os.path.exists(built_folder):
             shutil.copytree(built_folder, final_dist_dir, dirs_exist_ok=True)
 
+        # Package distribution zip file for sharing
+        zip_path = os.path.join(project_dir, "PosturFix_v1.0_Windows")
+        shutil.make_archive(zip_path, "zip", root_dir=os.path.join(project_dir, "dist"), base_dir="PosturFix")
+        full_zip = f"{zip_path}.zip"
+        zip_size_mb = round(os.path.getsize(full_zip) / (1024 * 1024), 2) if os.path.exists(full_zip) else 0
+
         print("\n" + "=" * 60)
         print(" [SUCCESS] Build completed successfully!")
-        print(f" Executable is located in: {final_dist_dir}")
+        print(f" Executable: {os.path.join(final_dist_dir, 'PosturFix.exe')}")
+        print(f" Distribution ZIP: {full_zip} ({zip_size_mb} MB)")
         print("=" * 60)
     except subprocess.CalledProcessError as e:
         print(f"\n [ERROR] Build failed with exit code: {e.returncode}")
