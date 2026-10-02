@@ -24,9 +24,30 @@ from PIL import Image, ImageTk, ImageDraw
 import customtkinter as ctk
 import pystray
 
+import json
+import urllib.request
+import webbrowser
+
 from config import PostureConfig
 from posture_engine import PostureEngine, PostureState, PostureMetrics
 import license_manager
+
+# Application Versioning & Global Metadata
+APP_VERSION = "1.0.0"
+APP_COPYRIGHT = "© 2026 PosturFix. All rights reserved."
+UPDATE_CHECK_URL = "https://raw.githubusercontent.com/andregooner/posturfix/main/version.json"
+
+
+def parse_version(v_str: str) -> tuple:
+    """Parses version strings like '1.0.0' or 'v1.1.0' into numeric tuples for safe comparison."""
+    clean = v_str.strip().lstrip("vV")
+    parts = []
+    for chunk in clean.split("."):
+        try:
+            parts.append(int(chunk))
+        except ValueError:
+            parts.append(0)
+    return tuple(parts)
 
 
 def resource_path(relative_path: str) -> str:
@@ -313,6 +334,129 @@ class MascotWidget(ctk.CTkFrame):
         self.speech_label.configure(text=dialogues.get(state, "Sit tall and stay healthy!"))
 
 
+class UpdateDialog(ctk.CTkToplevel):
+    """
+    Modern dark-themed update notification modal dialog.
+    Notifies user when a new release is available and allows 1-click download.
+    """
+
+    def __init__(
+        self,
+        parent: ctk.CTk,
+        current_version: str,
+        latest_version: str,
+        download_url: str,
+        release_notes: str = "",
+    ):
+        super().__init__(parent)
+        self.parent = parent
+        self.current_version = current_version
+        self.latest_version = latest_version
+        self.download_url = download_url
+        self.release_notes = release_notes
+
+        self.title("PosturFix Update Available")
+        self.geometry("460x340")
+        self.resizable(False, False)
+        self.attributes("-topmost", True)
+
+        self._center_window(460, 340)
+        self._build_ui()
+
+    def _center_window(self, width: int, height: int):
+        self.update_idletasks()
+        screen_w = self.winfo_screenwidth()
+        screen_h = self.winfo_screenheight()
+        x = max(0, (screen_w - width) // 2)
+        y = max(0, (screen_h - height) // 2)
+        self.geometry(f"{width}x{height}+{x}+{y}")
+
+    def _build_ui(self):
+        container = ctk.CTkFrame(self, corner_radius=12, fg_color=("gray95", "#18181B"))
+        container.pack(fill="both", expand=True, padx=16, pady=16)
+
+        # Header Icon Badge
+        badge = ctk.CTkLabel(container, text="🚀", font=ctk.CTkFont(size=36))
+        badge.pack(pady=(12, 4))
+
+        title_lbl = ctk.CTkLabel(
+            container,
+            text="New Version Available!",
+            font=ctk.CTkFont(size=18, weight="bold"),
+        )
+        title_lbl.pack(pady=(0, 4))
+
+        version_info = ctk.CTkLabel(
+            container,
+            text=f"Current: v{self.current_version}  ➔  Latest: v{self.latest_version}",
+            font=ctk.CTkFont(size=12, weight="bold"),
+            text_color="#10B981",
+        )
+        version_info.pack(pady=(0, 8))
+
+        prompt_text = (
+            f"A new version (v{self.latest_version}) is available!\n"
+            "Would you like to download it?"
+        )
+        prompt_lbl = ctk.CTkLabel(
+            container,
+            text=prompt_text,
+            font=ctk.CTkFont(size=12),
+            text_color="gray80",
+            wraplength=380,
+            justify="center",
+        )
+        prompt_lbl.pack(pady=(0, 8), padx=20)
+
+        if self.release_notes:
+            notes_frame = ctk.CTkFrame(container, fg_color=("gray90", "#27272A"), corner_radius=8)
+            notes_frame.pack(fill="x", padx=20, pady=(0, 14))
+            notes_lbl = ctk.CTkLabel(
+                notes_frame,
+                text=self.release_notes,
+                font=ctk.CTkFont(size=11),
+                text_color="gray75",
+                wraplength=360,
+                justify="center",
+            )
+            notes_lbl.pack(padx=10, pady=8)
+
+        # Button row: Later vs Download Now
+        btn_frame = ctk.CTkFrame(container, fg_color="transparent")
+        btn_frame.pack(fill="x", padx=20, pady=(6, 10))
+
+        later_btn = ctk.CTkButton(
+            btn_frame,
+            text="Later",
+            width=120,
+            height=36,
+            fg_color=("gray75", "#3F3F46"),
+            hover_color=("gray65", "#52525B"),
+            command=self.destroy,
+        )
+        later_btn.pack(side="left", expand=True, padx=(0, 8))
+
+        download_btn = ctk.CTkButton(
+            btn_frame,
+            text="Download Now",
+            width=160,
+            height=36,
+            fg_color="#3B82F6",
+            hover_color="#2563EB",
+            font=ctk.CTkFont(weight="bold"),
+            command=self._on_download,
+        )
+        download_btn.pack(side="right", expand=True, padx=(8, 0))
+
+    def _on_download(self):
+        try:
+            if self.download_url:
+                webbrowser.open(self.download_url)
+        except Exception:
+            pass
+        self.destroy()
+
+
 class PostureApp(ctk.CTk):
     """
     Main Desktop Window for PosturFix with System Tray & Sedentary Reminder.
@@ -437,6 +581,7 @@ class PostureApp(ctk.CTk):
                 ),
             ),
             pystray.MenuItem("Reset Break Timer", self._on_tray_reset_break_timer),
+            pystray.MenuItem("Check for Updates", self._on_tray_check_updates),
             pystray.Menu.SEPARATOR,
             pystray.MenuItem("Quit/Exit", self._on_tray_quit_app),
         )
@@ -488,6 +633,10 @@ class PostureApp(ctk.CTk):
     def _on_tray_reset_break_timer(self, icon=None, item=None):
         """Thread-safe callback to reset break timer from system tray."""
         self.after(0, self.reset_break_timer)
+
+    def _on_tray_check_updates(self, icon=None, item=None):
+        """Thread-safe callback to trigger update check from tray."""
+        self.after(0, lambda: self.check_for_updates(from_tray=True))
 
     def _on_tray_toggle_autostart(self, icon=None, item=None):
         """Thread-safe callback to toggle system startup entry."""
@@ -1226,6 +1375,64 @@ class PostureApp(ctk.CTk):
         )
         minimize_hint.pack(anchor="w", padx=15, pady=(0, 10))
 
+        # 7. About PosturFix & Update Checker Card
+        about_card = ctk.CTkFrame(right_panel, corner_radius=10, fg_color=("gray85", "#27272A"))
+        about_card.pack(fill="x", padx=10, pady=(6, 16))
+
+        about_title = ctk.CTkLabel(
+            about_card,
+            text="ABOUT POSTURFIX",
+            font=ctk.CTkFont(size=11, weight="bold"),
+            text_color="gray",
+        )
+        about_title.pack(anchor="w", padx=15, pady=(10, 4))
+
+        info_row = ctk.CTkFrame(about_card, fg_color="transparent")
+        info_row.pack(fill="x", padx=15, pady=(0, 2))
+
+        app_name_lbl = ctk.CTkLabel(
+            info_row,
+            text=f"PosturFix v{APP_VERSION}",
+            font=ctk.CTkFont(size=14, weight="bold"),
+            text_color=("gray10", "gray95"),
+        )
+        app_name_lbl.pack(side="left")
+
+        app_build_badge = ctk.CTkLabel(
+            info_row,
+            text=" Stable • 100% Offline ",
+            font=ctk.CTkFont(size=10, weight="bold"),
+            text_color="#10B981",
+            fg_color=("#D1FAE5", "#064E3B"),
+            corner_radius=4,
+        )
+        app_build_badge.pack(side="left", padx=8)
+
+        copyright_lbl = ctk.CTkLabel(
+            about_card,
+            text=APP_COPYRIGHT,
+            font=ctk.CTkFont(size=11),
+            text_color="gray",
+        )
+        copyright_lbl.pack(anchor="w", padx=15, pady=(0, 6))
+
+        self.update_status_lbl = ctk.CTkLabel(
+            about_card,
+            text="Status: Up to date",
+            font=ctk.CTkFont(size=11),
+            text_color="gray70",
+        )
+        self.update_status_lbl.pack(anchor="w", padx=15, pady=(0, 6))
+
+        self.check_update_btn = ctk.CTkButton(
+            about_card,
+            text="Check for Updates",
+            height=32,
+            font=ctk.CTkFont(size=12, weight="bold"),
+            command=self.check_for_updates,
+        )
+        self.check_update_btn.pack(fill="x", padx=15, pady=(0, 12))
+
     def _build_footer(self):
         """Bottom Information Strip."""
         footer_frame = ctk.CTkFrame(self, height=32, corner_radius=0, fg_color=("gray92", "#121214"))
@@ -1800,6 +2007,124 @@ class PostureApp(ctk.CTk):
             self.break_timer_lbl.configure(text=f"Active Sitting: {sitting_mins}m {sitting_secs:02d}s / {mins}m")
         except Exception:
             pass
+
+    # ----------------- ABOUT & UPDATE CHECKER -----------------
+
+    def check_for_updates(self, from_tray: bool = False):
+        """
+        Triggers an asynchronous check for updates.
+        Non-blocking background thread prevents any UI or camera stutter.
+        """
+        if hasattr(self, "check_update_btn"):
+            self.check_update_btn.configure(state="disabled", text="Checking...")
+        if hasattr(self, "update_status_lbl"):
+            self.update_status_lbl.configure(text="Checking for updates...", text_color="gray")
+
+        worker = threading.Thread(
+            target=self._async_check_updates_worker,
+            args=(from_tray,),
+            daemon=True,
+            name="PosturFix-UpdateChecker",
+        )
+        worker.start()
+
+    def _async_check_updates_worker(self, from_tray: bool):
+        """Worker thread to fetch remote version.json and compare versions."""
+        url = UPDATE_CHECK_URL
+        headers = {"User-Agent": f"PosturFix/{APP_VERSION} (Desktop; Windows)"}
+        req = urllib.request.Request(url, headers=headers)
+
+        latest_version = None
+        download_url = None
+        release_notes = ""
+        error_msg = None
+
+        try:
+            with urllib.request.urlopen(req, timeout=5) as response:
+                if response.status == 200:
+                    raw_data = response.read().decode("utf-8")
+                    data = json.loads(raw_data)
+                    latest_version = data.get("latest_version", "").strip()
+                    download_url = data.get("download_url", "").strip()
+                    release_notes = data.get("release_notes", "")
+                else:
+                    error_msg = f"HTTP {response.status}"
+        except Exception as e:
+            error_msg = str(e)
+
+        self.after(
+            0,
+            lambda: self._handle_update_check_result(
+                latest_version=latest_version,
+                download_url=download_url,
+                release_notes=release_notes,
+                error_msg=error_msg,
+                from_tray=from_tray,
+            ),
+        )
+
+    def _handle_update_check_result(
+        self,
+        latest_version: Optional[str],
+        download_url: Optional[str],
+        release_notes: str,
+        error_msg: Optional[str],
+        from_tray: bool,
+    ):
+        """Processes update check results safely on main GUI thread."""
+        if hasattr(self, "check_update_btn"):
+            self.check_update_btn.configure(state="normal", text="Check for Updates")
+
+        if error_msg or not latest_version:
+            if hasattr(self, "update_status_lbl"):
+                self.update_status_lbl.configure(
+                    text="Check failed: offline / connection error",
+                    text_color="#EF4444",
+                )
+            if from_tray and hasattr(self, "tray_icon") and self.tray_icon:
+                try:
+                    self.tray_icon.notify(
+                        "Unable to check for updates. Please verify your internet connection.",
+                        "PosturFix • Update Check",
+                    )
+                except Exception:
+                    pass
+            return
+
+        current_tup = parse_version(APP_VERSION)
+        latest_tup = parse_version(latest_version)
+
+        if latest_tup > current_tup:
+            if hasattr(self, "update_status_lbl"):
+                self.update_status_lbl.configure(
+                    text=f"New version v{latest_version} available!",
+                    text_color="#3B82F6",
+                )
+            # Display interactive modal prompt
+            target_download = download_url or "https://mayar.id/posturfix"
+            UpdateDialog(
+                parent=self,
+                current_version=APP_VERSION,
+                latest_version=latest_version,
+                download_url=target_download,
+                release_notes=release_notes,
+            )
+            # Dispatch native notification
+            self._dispatch_native_toast(
+                "Update Available",
+                f"A new version (v{latest_version}) of PosturFix is available! Click to download.",
+            )
+        else:
+            if hasattr(self, "update_status_lbl"):
+                self.update_status_lbl.configure(
+                    text="You are on the latest version.",
+                    text_color="#10B981",
+                )
+            # Display toast / message
+            self._dispatch_native_toast(
+                "PosturFix • Up to Date",
+                f"You are on the latest version (v{APP_VERSION}).",
+            )
 
 
 def main():
