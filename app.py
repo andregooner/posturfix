@@ -2235,11 +2235,130 @@ class PostureApp(ctk.CTk):
             )
 
 
+# ----------------- SINGLE INSTANCE LOCK (MUTEX) -----------------
+
+class SingleInstance:
+    """
+    Enforces a strict Single-Instance Lock (Mutex) across the operating system.
+    Uses a Windows Named Mutex on Windows and localhost socket binding on Unix/macOS.
+    Guarantees no duplicate background processes, tray icons, or camera hardware lockups.
+    """
+
+    def __init__(self, app_id: str = "PosturFix_SingleInstance_AppLock"):
+        self.app_id = app_id
+        self.mutex = None
+        self.sock = None
+
+    def acquire(self) -> bool:
+        """
+        Attempts to acquire the single-instance lock.
+        Returns True if this is the first/primary instance, False if already running.
+        """
+        if sys.platform == "win32":
+            import ctypes
+            kernel32 = ctypes.windll.kernel32
+            # Use Local\ namespace so it scopes per user desktop session
+            mutex_name = f"Local\\{self.app_id}"
+            self.mutex = kernel32.CreateMutexW(None, False, mutex_name)
+            ERROR_ALREADY_EXISTS = 183
+            if kernel32.GetLastError() == ERROR_ALREADY_EXISTS:
+                if self.mutex:
+                    kernel32.CloseHandle(self.mutex)
+                    self.mutex = None
+                return False
+            return True
+        else:
+            import socket
+            try:
+                self.sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                # Bind to loopback on an ephemeral dedicated high port
+                self.sock.bind(("127.0.0.1", 49582))
+                self.sock.listen(1)
+                return True
+            except (socket.error, OSError):
+                return False
+
+    def release(self):
+        """Releases the lock on application shutdown."""
+        if sys.platform == "win32" and self.mutex:
+            try:
+                import ctypes
+                ctypes.windll.kernel32.CloseHandle(self.mutex)
+            except Exception:
+                pass
+            self.mutex = None
+        elif self.sock:
+            try:
+                self.sock.close()
+            except Exception:
+                pass
+            self.sock = None
+
+
+def notify_already_running():
+    """
+    Alerts the user that PosturFix is already running in the background/system tray
+    and attempts to bring the existing window to the foreground.
+    """
+    # 1. Bring existing window to front if it is open/minimized on Windows
+    if sys.platform == "win32":
+        try:
+            import ctypes
+            user32 = ctypes.windll.user32
+            # Window title defined in PostureApp
+            hwnd = user32.FindWindowW(None, "PosturFix • 100% Offline & Private")
+            if hwnd:
+                SW_RESTORE = 9
+                user32.ShowWindow(hwnd, SW_RESTORE)
+                user32.SetForegroundWindow(hwnd)
+        except Exception:
+            pass
+
+    # 2. Fire native OS desktop toast notification
+    try:
+        from winotify import Notification
+        icon_path = os.path.abspath(resource_path(os.path.join("assets", "icon.ico")))
+        if not os.path.exists(icon_path):
+            icon_path = ""
+        toast = Notification(
+            app_id="PosturFix",
+            title="PosturFix",
+            msg="PosturFix is already running in the system tray.",
+            duration="short",
+            icon=icon_path,
+        )
+        toast.show()
+        return
+    except Exception:
+        pass
+
+    try:
+        from plyer import notification
+        notification.notify(
+            title="PosturFix",
+            message="PosturFix is already running in the system tray.",
+            app_name="PosturFix",
+            timeout=4,
+        )
+    except Exception:
+        pass
+
+
 def main():
     """Application entry point: starts visible by default, runs hidden in tray if --minimized or --tray."""
+    # 1. Enforce Single Instance Lock before initializing Tkinter, MediaPipe, or Camera hardware
+    instance_lock = SingleInstance()
+    if not instance_lock.acquire():
+        notify_already_running()
+        sys.exit(0)
+
+    # 2. Proceed with normal startup
     start_hidden = ("--minimized" in sys.argv or "--tray" in sys.argv) and ("--show" not in sys.argv)
     app = PostureApp(start_hidden=start_hidden)
-    app.mainloop()
+    try:
+        app.mainloop()
+    finally:
+        instance_lock.release()
 
 
 if __name__ == "__main__":
