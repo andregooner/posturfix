@@ -165,16 +165,20 @@ class PostureEngine:
 
     def process_frame(self, frame_bgr: np.ndarray) -> Tuple[np.ndarray, PostureMetrics]:
         """
-        Processes a single BGR video frame in-memory.
+        Processes a single BGR video frame in-memory with safe landmark extraction.
         Returns:
             processed_frame: Annotated frame (if drawing enabled)
             metrics: PostureMetrics dataclass with current state and measurements
         """
+        # Guard against None or corrupted input frame
+        if frame_bgr is None or frame_bgr.size == 0:
+            return frame_bgr, PostureMetrics(state=PostureState.NO_PERSON)
+
         now = time.time()
         dt = max(0.001, now - self._last_frame_timestamp)
         self._last_frame_timestamp = now
 
-        # Requirement 2: Frame Downscaling to 640x480 for minimum CPU consumption
+        # Frame Downscaling to 640x480 for minimum CPU consumption
         h_orig, w_orig = frame_bgr.shape[:2]
         h, w = h_orig, w_orig
         target_w = self.config.inference_width
@@ -185,10 +189,6 @@ class PostureEngine:
         else:
             infer_frame = frame_bgr
 
-        # Convert downscaled frame to RGB for MediaPipe inference (100% in RAM)
-        frame_rgb = cv2.cvtColor(infer_frame, cv2.COLOR_BGR2RGB)
-        results = self.pose.process(frame_rgb)
-
         metrics = PostureMetrics(
             is_calibrated=self.is_calibrated,
             baseline_neck_ratio=self.baseline_neck_ratio,
@@ -198,236 +198,270 @@ class PostureEngine:
             baseline_eye_distance=self.baseline_eye_distance,
         )
 
-        # Requirement 4: Fast-Fail (Idle Mode)
-        # If no pose landmarks are detected, immediately break out of calculation logic to save CPU
-        if not results.pose_landmarks:
+        annotated_frame = frame_bgr.copy() if self.config.draw_skeleton else frame_bgr
+
+        # -------------------------------------------------------------
+        # 1. MediaPipe Pose Inference with Exception Guard
+        # -------------------------------------------------------------
+        try:
+            frame_rgb = cv2.cvtColor(infer_frame, cv2.COLOR_BGR2RGB)
+            results = self.pose.process(frame_rgb)
+        except Exception as e:
+            print(f"[PosturFix Engine] MediaPipe inference exception: {e}", file=sys.stderr)
+            metrics.state = PostureState.NO_PERSON
+            metrics.slouch_reason = "Inference bypassed"
+            return annotated_frame, metrics
+
+        # -------------------------------------------------------------
+        # 2. Safe Landmark Extraction (Explicit Null Checking)
+        # If landmarks are missing, safely bypass posture calculation
+        # -------------------------------------------------------------
+        if (
+            results is None
+            or not hasattr(results, "pose_landmarks")
+            or results.pose_landmarks is None
+            or not hasattr(results.pose_landmarks, "landmark")
+            or not results.pose_landmarks.landmark
+        ):
             self._slouch_start_time = None
             self._eye_close_start_time = None
             metrics.state = PostureState.NO_PERSON
             self._last_state = metrics.state
             metrics.session_good_posture_percentage = self._compute_good_percentage()
-            return frame_bgr, metrics
-
-        annotated_frame = frame_bgr.copy() if self.config.draw_skeleton else frame_bgr
-
-        landmarks = results.pose_landmarks.landmark
-
-        # Extract Key Upper-Body Landmarks
-        # Left & Right Shoulders
-        sh_left = landmarks[self.mp_pose.PoseLandmark.LEFT_SHOULDER]
-        sh_right = landmarks[self.mp_pose.PoseLandmark.RIGHT_SHOULDER]
-
-        # Left & Right Ears
-        ear_left = landmarks[self.mp_pose.PoseLandmark.LEFT_EAR]
-        ear_right = landmarks[self.mp_pose.PoseLandmark.RIGHT_EAR]
-
-        # Nose & Eyes for head tracking & eye distance
-        nose = landmarks[self.mp_pose.PoseLandmark.NOSE]
-        eye_left = landmarks[self.mp_pose.PoseLandmark.LEFT_EYE]
-        eye_right = landmarks[self.mp_pose.PoseLandmark.RIGHT_EYE]
-
-        # Landmark visibility check: Shoulders and at least one ear/eye must be visible
-        min_vis = 0.45
-        if sh_left.visibility < min_vis or sh_right.visibility < min_vis:
-            metrics.state = PostureState.NO_PERSON
-            metrics.slouch_reason = "Shoulders partially obstructed"
-            self._slouch_start_time = None
-            self._eye_close_start_time = None
             return annotated_frame, metrics
 
-        # Pixel Coordinates for geometric calculations
-        p_sh_left = (sh_left.x * w, sh_left.y * h)
-        p_sh_right = (sh_right.x * w, sh_right.y * h)
-        p_ear_left = (ear_left.x * w, ear_left.y * h)
-        p_ear_right = (ear_right.x * w, ear_right.y * h)
-        p_nose = (nose.x * w, nose.y * h)
-        p_eye_left = (eye_left.x * w, eye_left.y * h)
-        p_eye_right = (eye_right.x * w, eye_right.y * h)
+        # -------------------------------------------------------------
+        # 3. Robust Landmark Coordinate Extraction & Geometric Analysis
+        # -------------------------------------------------------------
+        try:
+            landmarks = results.pose_landmarks.landmark
+            if len(landmarks) < 33:
+                metrics.state = PostureState.NO_PERSON
+                metrics.slouch_reason = "Incomplete landmarks"
+                return annotated_frame, metrics
 
-        # Midpoints
-        mid_shoulder = (
-            (p_sh_left[0] + p_sh_right[0]) / 2.0,
-            (p_sh_left[1] + p_sh_right[1]) / 2.0,
-        )
-        mid_ear = (
-            (p_ear_left[0] + p_ear_right[0]) / 2.0,
-            (p_ear_left[1] + p_ear_right[1]) / 2.0,
-        )
+            # Extract Key Upper-Body Landmarks with null / boundary checks
+            sh_left = landmarks[self.mp_pose.PoseLandmark.LEFT_SHOULDER]
+            sh_right = landmarks[self.mp_pose.PoseLandmark.RIGHT_SHOULDER]
+            ear_left = landmarks[self.mp_pose.PoseLandmark.LEFT_EAR]
+            ear_right = landmarks[self.mp_pose.PoseLandmark.RIGHT_EAR]
+            nose = landmarks[self.mp_pose.PoseLandmark.NOSE]
+            eye_left = landmarks[self.mp_pose.PoseLandmark.LEFT_EYE]
+            eye_right = landmarks[self.mp_pose.PoseLandmark.RIGHT_EYE]
 
-        # Scale Factor: Shoulder Width in pixels
-        # Used to normalize vertical distances against camera zoom or moving back/forth
-        shoulder_width = self._euclidean_distance(p_sh_left, p_sh_right)
-        shoulder_width = max(shoulder_width, 1.0)  # Avoid zero division
+            # Null check individual landmarks
+            if any(lm is None for lm in (sh_left, sh_right, ear_left, ear_right, nose, eye_left, eye_right)):
+                metrics.state = PostureState.NO_PERSON
+                return annotated_frame, metrics
 
-        # Eye Distance: Euclidean distance between Left Eye and Right Eye
-        eye_distance = self._euclidean_distance(p_eye_left, p_eye_right)
-        metrics.eye_distance = eye_distance
-
-        # Neck Vertical Distance: Head vertical height above shoulder line
-        # In image coordinates, Y increases downward. So shoulder.y > ear.y when upright.
-        neck_vertical_dist = mid_shoulder[1] - mid_ear[1]
-
-        # Normalized Neck Ratio: Higher = upright neck, Lower = slouched/forward head
-        neck_ratio = neck_vertical_dist / shoulder_width
-
-        # Tilts in degrees
-        shoulder_tilt_deg = abs(self._calculate_angle(p_sh_left, p_sh_right))
-        head_tilt_deg = abs(self._calculate_angle(p_ear_left, p_ear_right))
-
-        # Update current measurement metrics
-        metrics.neck_ratio = neck_ratio
-        metrics.shoulder_tilt_deg = shoulder_tilt_deg
-        metrics.head_tilt_deg = head_tilt_deg
-        metrics.shoulder_width = shoulder_width
-
-        # Handle Calibration Routine
-        if self.calibrating:
-            metrics.state = PostureState.CALIBRATING
-            self._calibration_samples.append({
-                "neck_ratio": neck_ratio,
-                "shoulder_tilt": shoulder_tilt_deg,
-                "head_tilt": head_tilt_deg,
-                "shoulder_width": shoulder_width,
-                "eye_distance": eye_distance,
-            })
-
-            progress = len(self._calibration_samples) / float(self.config.calibration_frame_count)
-            metrics.calibration_progress = min(progress, 1.0)
-
-            if len(self._calibration_samples) >= self.config.calibration_frame_count:
-                # Average baseline values over collected stable frames
-                self.baseline_neck_ratio = float(np.mean([s["neck_ratio"] for s in self._calibration_samples]))
-                self.baseline_shoulder_tilt_deg = float(np.mean([s["shoulder_tilt"] for s in self._calibration_samples]))
-                self.baseline_head_tilt_deg = float(np.mean([s["head_tilt"] for s in self._calibration_samples]))
-                self.baseline_shoulder_width = float(np.mean([s["shoulder_width"] for s in self._calibration_samples]))
-                self.baseline_eye_distance = float(np.mean([s["eye_distance"] for s in self._calibration_samples]))
-
-                self.is_calibrated = True
-                self.calibrating = False
-                metrics.is_calibrated = True
-                metrics.baseline_eye_distance = self.baseline_eye_distance
-                metrics.state = PostureState.GOOD
+            # Landmark visibility check: Shoulders and at least one ear/eye must be visible
+            min_vis = 0.45
+            if sh_left.visibility < min_vis or sh_right.visibility < min_vis:
+                metrics.state = PostureState.NO_PERSON
+                metrics.slouch_reason = "Shoulders partially obstructed"
                 self._slouch_start_time = None
+                self._eye_close_start_time = None
+                return annotated_frame, metrics
 
-            # Render calibration visuals
-            self._render_overlay(annotated_frame, mid_shoulder, mid_ear, p_sh_left, p_sh_right, p_eye_left, p_eye_right, metrics.state, False)
-            return annotated_frame, metrics
+            # Pixel Coordinates for geometric calculations
+            p_sh_left = (sh_left.x * w, sh_left.y * h)
+            p_sh_right = (sh_right.x * w, sh_right.y * h)
+            p_ear_left = (ear_left.x * w, ear_left.y * h)
+            p_ear_right = (ear_right.x * w, ear_right.y * h)
+            p_nose = (nose.x * w, nose.y * h)
+            p_eye_left = (eye_left.x * w, eye_left.y * h)
+            p_eye_right = (eye_right.x * w, eye_right.y * h)
 
-        if not self.is_calibrated:
-            metrics.state = PostureState.UNCALIBRATED
-            metrics.slouch_reason = "Please sit upright and click Calibrate"
-            self._render_overlay(annotated_frame, mid_shoulder, mid_ear, p_sh_left, p_sh_right, p_eye_left, p_eye_right, metrics.state, False)
-            return annotated_frame, metrics
+            # Sanity check against NaN / Inf values
+            coords = [p_sh_left, p_sh_right, p_ear_left, p_ear_right, p_nose, p_eye_left, p_eye_right]
+            if any(math.isnan(c[0]) or math.isnan(c[1]) or math.isinf(c[0]) or math.isinf(c[1]) for c in coords):
+                metrics.state = PostureState.NO_PERSON
+                metrics.slouch_reason = "Corrupted coordinates"
+                return annotated_frame, metrics
 
-        # -------------------------------------------------------------
-        # Ergonomic Posture Evaluation against Calibrated Baseline
-        # -------------------------------------------------------------
-        reasons: List[str] = []
+            # Midpoints
+            mid_shoulder = (
+                (p_sh_left[0] + p_sh_right[0]) / 2.0,
+                (p_sh_left[1] + p_sh_right[1]) / 2.0,
+            )
+            mid_ear = (
+                (p_ear_left[0] + p_ear_right[0]) / 2.0,
+                (p_ear_left[1] + p_ear_right[1]) / 2.0,
+            )
 
-        # 1. Forward Head Droop / Neck Slouch
-        neck_drop_ratio = (self.baseline_neck_ratio - neck_ratio) / max(0.001, self.baseline_neck_ratio)
-        if neck_drop_ratio > self.config.neck_ratio_drop_threshold:
-            reasons.append(f"Neck slouching ({int(neck_drop_ratio * 100)}% drop)")
+            # Scale Factor: Shoulder Width in pixels
+            shoulder_width = self._euclidean_distance(p_sh_left, p_sh_right)
+            shoulder_width = max(shoulder_width, 1.0)  # Avoid zero division
 
-        # 2. Uneven / Tilted Shoulders
-        shoulder_tilt_diff = abs(shoulder_tilt_deg - self.baseline_shoulder_tilt_deg)
-        if shoulder_tilt_diff > self.config.shoulder_tilt_threshold_deg:
-            reasons.append(f"Shoulder tilt ({int(shoulder_tilt_diff)}°)")
+            # Eye Distance: Euclidean distance between Left Eye and Right Eye
+            eye_distance = self._euclidean_distance(p_eye_left, p_eye_right)
+            metrics.eye_distance = eye_distance
 
-        # 3. Head Tilt / Asymmetric lean
-        head_tilt_diff = abs(head_tilt_deg - self.baseline_head_tilt_deg)
-        if head_tilt_diff > self.config.head_tilt_threshold_deg:
-            reasons.append(f"Head tilt ({int(head_tilt_diff)}°)")
+            # Neck Vertical Distance: Head vertical height above shoulder line
+            neck_vertical_dist = mid_shoulder[1] - mid_ear[1]
 
-        # 4. Leaning excessively forward into the screen (Torso forward hunch check)
-        width_expansion = (shoulder_width - self.baseline_shoulder_width) / max(0.001, self.baseline_shoulder_width)
-        if width_expansion > self.config.forward_lean_threshold:
-            reasons.append("Leaning too close to screen")
+            # Normalized Neck Ratio: Higher = upright neck, Lower = slouched/forward head
+            neck_ratio = neck_vertical_dist / shoulder_width
 
-        # Main Posture Slouching Assessment (100% Independent from Eye Proximity)
-        is_slouching = len(reasons) > 0
-        metrics.slouch_reason = ", ".join(reasons) if is_slouching else "Good posture maintained"
+            # Tilts in degrees
+            shoulder_tilt_deg = abs(self._calculate_angle(p_sh_left, p_sh_right))
+            head_tilt_deg = abs(self._calculate_angle(p_ear_left, p_ear_right))
 
-        # -------------------------------------------------------------
-        # ISOLATED Eye-to-Screen Distance (Screen Proximity / Eye Protection)
-        # 15-second consecutive trigger buffer. Zero interference with slouching.
-        # -------------------------------------------------------------
-        if (
-            self.config.eye_distance_warning_enabled
-            and self.baseline_eye_distance > 1.0
-            and eye_left.visibility >= 0.4
-            and eye_right.visibility >= 0.4
-        ):
-            eye_expansion = (eye_distance - self.baseline_eye_distance) / self.baseline_eye_distance
-            if eye_expansion > self.config.eye_distance_threshold_ratio:
-                metrics.is_screen_too_close = True
-                if self._eye_close_start_time is None:
-                    self._eye_close_start_time = now
+            # Update current measurement metrics
+            metrics.neck_ratio = neck_ratio
+            metrics.shoulder_tilt_deg = shoulder_tilt_deg
+            metrics.head_tilt_deg = head_tilt_deg
+            metrics.shoulder_width = shoulder_width
 
-                eye_elapsed = now - self._eye_close_start_time
-                metrics.eye_close_duration = eye_elapsed
+            # Handle Calibration Routine
+            if self.calibrating:
+                metrics.state = PostureState.CALIBRATING
+                self._calibration_samples.append({
+                    "neck_ratio": neck_ratio,
+                    "shoulder_tilt": shoulder_tilt_deg,
+                    "head_tilt": head_tilt_deg,
+                    "shoulder_width": shoulder_width,
+                    "eye_distance": eye_distance,
+                })
 
-                # Only marked as sustained if face stays too close for 15 straight seconds
-                if eye_elapsed >= self.config.eye_distance_buffer_seconds:
-                    metrics.is_screen_too_close_sustained = True
+                progress = len(self._calibration_samples) / float(self.config.calibration_frame_count)
+                metrics.calibration_progress = min(progress, 1.0)
+
+                if len(self._calibration_samples) >= self.config.calibration_frame_count:
+                    self.baseline_neck_ratio = float(np.mean([s["neck_ratio"] for s in self._calibration_samples]))
+                    self.baseline_shoulder_tilt_deg = float(np.mean([s["shoulder_tilt"] for s in self._calibration_samples]))
+                    self.baseline_head_tilt_deg = float(np.mean([s["head_tilt"] for s in self._calibration_samples]))
+                    self.baseline_shoulder_width = float(np.mean([s["shoulder_width"] for s in self._calibration_samples]))
+                    self.baseline_eye_distance = float(np.mean([s["eye_distance"] for s in self._calibration_samples]))
+
+                    self.is_calibrated = True
+                    self.calibrating = False
+                    metrics.is_calibrated = True
+                    metrics.baseline_eye_distance = self.baseline_eye_distance
+                    metrics.state = PostureState.GOOD
+                    self._slouch_start_time = None
+
+                self._render_overlay(annotated_frame, mid_shoulder, mid_ear, p_sh_left, p_sh_right, p_eye_left, p_eye_right, metrics.state, False)
+                return annotated_frame, metrics
+
+            if not self.is_calibrated:
+                metrics.state = PostureState.UNCALIBRATED
+                metrics.slouch_reason = "Please sit upright and click Calibrate"
+                self._render_overlay(annotated_frame, mid_shoulder, mid_ear, p_sh_left, p_sh_right, p_eye_left, p_eye_right, metrics.state, False)
+                return annotated_frame, metrics
+
+            # -------------------------------------------------------------
+            # Ergonomic Posture Evaluation against Calibrated Baseline
+            # -------------------------------------------------------------
+            reasons: List[str] = []
+
+            # 1. Forward Head Droop / Neck Slouch
+            neck_drop_ratio = (self.baseline_neck_ratio - neck_ratio) / max(0.001, self.baseline_neck_ratio)
+            if neck_drop_ratio > self.config.neck_ratio_drop_threshold:
+                reasons.append(f"Neck slouching ({int(neck_drop_ratio * 100)}% drop)")
+
+            # 2. Uneven / Tilted Shoulders
+            shoulder_tilt_diff = abs(shoulder_tilt_deg - self.baseline_shoulder_tilt_deg)
+            if shoulder_tilt_diff > self.config.shoulder_tilt_threshold_deg:
+                reasons.append(f"Shoulder tilt ({int(shoulder_tilt_diff)}°)")
+
+            # 3. Head Tilt / Asymmetric lean
+            head_tilt_diff = abs(head_tilt_deg - self.baseline_head_tilt_deg)
+            if head_tilt_diff > self.config.head_tilt_threshold_deg:
+                reasons.append(f"Head tilt ({int(head_tilt_diff)}°)")
+
+            # 4. Leaning excessively forward into the screen
+            width_expansion = (shoulder_width - self.baseline_shoulder_width) / max(0.001, self.baseline_shoulder_width)
+            if width_expansion > self.config.forward_lean_threshold:
+                reasons.append("Leaning too close to screen")
+
+            is_slouching = len(reasons) > 0
+            metrics.slouch_reason = ", ".join(reasons) if is_slouching else "Good posture maintained"
+
+            # -------------------------------------------------------------
+            # ISOLATED Eye-to-Screen Distance
+            # -------------------------------------------------------------
+            if (
+                self.config.eye_distance_warning_enabled
+                and self.baseline_eye_distance > 1.0
+                and eye_left.visibility >= 0.4
+                and eye_right.visibility >= 0.4
+            ):
+                eye_expansion = (eye_distance - self.baseline_eye_distance) / self.baseline_eye_distance
+                if eye_expansion > self.config.eye_distance_threshold_ratio:
+                    metrics.is_screen_too_close = True
+                    if self._eye_close_start_time is None:
+                        self._eye_close_start_time = now
+
+                    eye_elapsed = now - self._eye_close_start_time
+                    metrics.eye_close_duration = eye_elapsed
+
+                    if eye_elapsed >= self.config.eye_distance_buffer_seconds:
+                        metrics.is_screen_too_close_sustained = True
+                    else:
+                        metrics.is_screen_too_close_sustained = False
                 else:
+                    self._eye_close_start_time = None
+                    metrics.is_screen_too_close = False
                     metrics.is_screen_too_close_sustained = False
+                    metrics.eye_close_duration = 0.0
             else:
-                # User leaned back -> reset 15-second timer immediately
                 self._eye_close_start_time = None
                 metrics.is_screen_too_close = False
                 metrics.is_screen_too_close_sustained = False
                 metrics.eye_close_duration = 0.0
-        else:
-            self._eye_close_start_time = None
-            metrics.is_screen_too_close = False
-            metrics.is_screen_too_close_sustained = False
-            metrics.eye_close_duration = 0.0
 
-        # Update Session Posture Statistics
-        self._total_monitored_time += dt
-        if not is_slouching:
-            self._total_good_time += dt
+            # Update Session Posture Statistics
+            self._total_monitored_time += dt
+            if not is_slouching:
+                self._total_good_time += dt
 
-        metrics.session_good_posture_percentage = self._compute_good_percentage()
+            metrics.session_good_posture_percentage = self._compute_good_percentage()
 
-        # Slouch Timer & State Transition
-        if is_slouching:
-            if self._slouch_start_time is None:
-                self._slouch_start_time = now
+            # Slouch Timer & State Transition
+            if is_slouching:
+                if self._slouch_start_time is None:
+                    self._slouch_start_time = now
 
-            slouch_elapsed = now - self._slouch_start_time
-            metrics.slouch_duration = slouch_elapsed
+                slouch_elapsed = now - self._slouch_start_time
+                metrics.slouch_duration = slouch_elapsed
 
-            if slouch_elapsed >= self.config.slouch_alert_delay_seconds:
-                metrics.state = PostureState.SLOUCHING
-                # Check alert throttle
-                if (now - self._last_alert_time) >= self.config.alert_repeat_interval_seconds:
-                    self._play_alert_sound()
-                    self._last_alert_time = now
-                    metrics.alert_fired = True
+                if slouch_elapsed >= self.config.slouch_alert_delay_seconds:
+                    metrics.state = PostureState.SLOUCHING
+                    if (now - self._last_alert_time) >= self.config.alert_repeat_interval_seconds:
+                        self._play_alert_sound()
+                        self._last_alert_time = now
+                        metrics.alert_fired = True
+                else:
+                    metrics.state = PostureState.WARNING
             else:
-                metrics.state = PostureState.WARNING
-        else:
-            self._slouch_start_time = None
-            metrics.slouch_duration = 0.0
-            metrics.state = PostureState.GOOD
-            self._last_alert_time = 0.0
+                self._slouch_start_time = None
+                metrics.slouch_duration = 0.0
+                metrics.state = PostureState.GOOD
+                self._last_alert_time = 0.0
 
-        self._last_state = metrics.state
+            self._last_state = metrics.state
 
-        # Render Visual Overlays on Frame
-        self._render_overlay(
-            annotated_frame,
-            mid_shoulder,
-            mid_ear,
-            p_sh_left,
-            p_sh_right,
-            p_eye_left,
-            p_eye_right,
-            metrics.state,
-            metrics.is_screen_too_close,
-        )
+            # Render Visual Overlays on Frame
+            self._render_overlay(
+                annotated_frame,
+                mid_shoulder,
+                mid_ear,
+                p_sh_left,
+                p_sh_right,
+                p_eye_left,
+                p_eye_right,
+                metrics.state,
+                metrics.is_screen_too_close,
+            )
+
+        except Exception as e:
+            # Safe recovery from any unhandled landmark or calculation error:
+            # Do NOT crash. Bypass calculation for this frame and return safely.
+            print(f"[PosturFix Engine Warning] Error in posture calculation: {e}", file=sys.stderr)
+            metrics.state = PostureState.NO_PERSON
+            metrics.slouch_reason = "Posture math bypassed"
+            return annotated_frame, metrics
 
         return annotated_frame, metrics
 
@@ -454,46 +488,49 @@ class PostureEngine:
         if not self.config.draw_skeleton:
             return
 
-        # Theme color mapping (BGR)
-        color_map = {
-            PostureState.GOOD: (64, 210, 110),        # Vibrant Green
-            PostureState.WARNING: (0, 190, 255),      # Amber/Yellow
-            PostureState.SLOUCHING: (60, 60, 235),     # Bright Coral Red
-            PostureState.CALIBRATING: (255, 175, 40), # Cyan / Sky Blue
-            PostureState.UNCALIBRATED: (180, 180, 180), # Gray
-            PostureState.NO_PERSON: (120, 120, 120),  # Dark Gray
-        }
-        color = color_map.get(state, (200, 200, 200))
+        try:
+            # Theme color mapping (BGR)
+            color_map = {
+                PostureState.GOOD: (64, 210, 110),        # Vibrant Green
+                PostureState.WARNING: (0, 190, 255),      # Amber/Yellow
+                PostureState.SLOUCHING: (60, 60, 235),     # Bright Coral Red
+                PostureState.CALIBRATING: (255, 175, 40), # Cyan / Sky Blue
+                PostureState.UNCALIBRATED: (180, 180, 180), # Gray
+                PostureState.NO_PERSON: (120, 120, 120),  # Dark Gray
+            }
+            color = color_map.get(state, (200, 200, 200))
 
-        # Convert coordinates to integers
-        pt_mid_sh = (int(mid_shoulder[0]), int(mid_shoulder[1]))
-        pt_mid_ear = (int(mid_ear[0]), int(mid_ear[1]))
-        pt_sh_l = (int(sh_left[0]), int(sh_left[1]))
-        pt_sh_r = (int(sh_right[0]), int(sh_right[1]))
+            # Convert coordinates to integers with bounds checking
+            pt_mid_sh = (int(mid_shoulder[0]), int(mid_shoulder[1]))
+            pt_mid_ear = (int(mid_ear[0]), int(mid_ear[1]))
+            pt_sh_l = (int(sh_left[0]), int(sh_left[1]))
+            pt_sh_r = (int(sh_right[0]), int(sh_right[1]))
 
-        # Draw Shoulder Axis
-        cv2.line(frame, pt_sh_l, pt_sh_r, color, 3, cv2.LINE_AA)
+            # Draw Shoulder Axis
+            cv2.line(frame, pt_sh_l, pt_sh_r, color, 3, cv2.LINE_AA)
 
-        # Draw Neck Spine Vector
-        cv2.line(frame, pt_mid_sh, pt_mid_ear, color, 3, cv2.LINE_AA)
+            # Draw Neck Spine Vector
+            cv2.line(frame, pt_mid_sh, pt_mid_ear, color, 3, cv2.LINE_AA)
 
-        # Draw Eye Distance Axis (Screen proximity indicator)
-        pt_eye_l = (int(eye_left[0]), int(eye_left[1]))
-        pt_eye_r = (int(eye_right[0]), int(eye_right[1]))
-        eye_color = (60, 60, 235) if is_screen_too_close else (255, 235, 175)
-        cv2.line(frame, pt_eye_l, pt_eye_r, eye_color, 2, cv2.LINE_AA)
-        cv2.circle(frame, pt_eye_l, 4, eye_color, -1, cv2.LINE_AA)
-        cv2.circle(frame, pt_eye_r, 4, eye_color, -1, cv2.LINE_AA)
+            # Draw Eye Distance Axis (Screen proximity indicator)
+            pt_eye_l = (int(eye_left[0]), int(eye_left[1]))
+            pt_eye_r = (int(eye_right[0]), int(eye_right[1]))
+            eye_color = (60, 60, 235) if is_screen_too_close else (255, 235, 175)
+            cv2.line(frame, pt_eye_l, pt_eye_r, eye_color, 2, cv2.LINE_AA)
+            cv2.circle(frame, pt_eye_l, 4, eye_color, -1, cv2.LINE_AA)
+            cv2.circle(frame, pt_eye_r, 4, eye_color, -1, cv2.LINE_AA)
 
-        # Draw Landmark Keypoints
-        cv2.circle(frame, pt_mid_sh, 6, (255, 255, 255), -1, cv2.LINE_AA)
-        cv2.circle(frame, pt_mid_sh, 8, color, 2, cv2.LINE_AA)
+            # Draw Landmark Keypoints
+            cv2.circle(frame, pt_mid_sh, 6, (255, 255, 255), -1, cv2.LINE_AA)
+            cv2.circle(frame, pt_mid_sh, 8, color, 2, cv2.LINE_AA)
 
-        cv2.circle(frame, pt_mid_ear, 6, (255, 255, 255), -1, cv2.LINE_AA)
-        cv2.circle(frame, pt_mid_ear, 8, color, 2, cv2.LINE_AA)
+            cv2.circle(frame, pt_mid_ear, 6, (255, 255, 255), -1, cv2.LINE_AA)
+            cv2.circle(frame, pt_mid_ear, 8, color, 2, cv2.LINE_AA)
 
-        cv2.circle(frame, pt_sh_l, 5, color, -1, cv2.LINE_AA)
-        cv2.circle(frame, pt_sh_r, 5, color, -1, cv2.LINE_AA)
+            cv2.circle(frame, pt_sh_l, 5, color, -1, cv2.LINE_AA)
+            cv2.circle(frame, pt_sh_r, 5, color, -1, cv2.LINE_AA)
+        except Exception:
+            pass
 
     def set_sensitivity(self, level: str) -> None:
         """Configures posture sensitivity ('Low', 'Medium', 'High')."""

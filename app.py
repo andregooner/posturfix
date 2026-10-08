@@ -15,6 +15,7 @@ import sys
 import time
 import math
 import threading
+import queue
 import tkinter as tk
 from typing import Optional
 
@@ -490,6 +491,8 @@ class PostureApp(ctk.CTk):
         self.cap: Optional[cv2.VideoCapture] = None
         self.camera_running = False
         self._camera_thread: Optional[threading.Thread] = None
+        self._frame_queue: queue.Queue = queue.Queue(maxsize=1)
+        self._ui_poll_started: bool = False
         self.is_window_visible: bool = not start_hidden
         self.privacy_mode = self.config.privacy_mode_default
         self.current_metrics: PostureMetrics = PostureMetrics()
@@ -1519,9 +1522,14 @@ class PostureApp(ctk.CTk):
 
     def start_camera(self):
         """Initializes the background camera worker thread for non-blocking posture checks."""
-        self.camera_running = True
-        self._camera_thread = threading.Thread(target=self._camera_worker, daemon=True)
-        self._camera_thread.start()
+        if not self.camera_running:
+            self.camera_running = True
+            self._camera_thread = threading.Thread(target=self._camera_worker, daemon=True)
+            self._camera_thread.start()
+
+        if not getattr(self, "_ui_poll_started", False):
+            self._ui_poll_started = True
+            self.after(33, self._ui_poll_loop)
 
     def _open_camera_safe(self) -> Optional[cv2.VideoCapture]:
         """
@@ -1540,6 +1548,10 @@ class PostureApp(ctk.CTk):
             if cap.isOpened():
                 cap.set(cv2.CAP_PROP_FRAME_WIDTH, self.config.frame_width)
                 cap.set(cv2.CAP_PROP_FRAME_HEIGHT, self.config.frame_height)
+                try:
+                    cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+                except Exception:
+                    pass
                 # Warm-up loop: webcams need a few hundred milliseconds to negotiate capture graph
                 for _ in range(12):
                     ret, test_frame = cap.read()
@@ -1737,18 +1749,32 @@ class PostureApp(ctk.CTk):
                 ret, frame = False, None
                 try:
                     ret, frame = self.cap.read()
-                except Exception:
+                except Exception as read_err:
+                    print(f"[PosturFix Camera Warning] Exception during cap.read(): {read_err}", file=sys.stderr)
                     ret, frame = False, None
 
-                # Camera conflict / empty frame check
+                # Camera conflict / empty frame check & Frame Drop Protection
                 if not ret or frame is None or frame.size == 0:
                     consecutive_read_failures += 1
-                    # Tolerate brief single-frame drops without releasing camera graph
-                    if consecutive_read_failures < 6:
+                    print(
+                        f"[PosturFix Camera Warning] Empty or dropped frame detected (consecutive: {consecutive_read_failures})",
+                        file=sys.stderr,
+                    )
+
+                    # Flush buffer if possible to clear corrupted driver state
+                    try:
+                        if self.cap is not None and self.cap.isOpened():
+                            self.cap.grab()
+                    except Exception:
+                        pass
+
+                    # Tolerate brief drops without releasing camera graph (e.g., auto-exposure shifts, USB jitter)
+                    # Tolerate up to 30 consecutive drops (~1.5s) before treating as camera disconnect
+                    if consecutive_read_failures < 30:
                         time.sleep(0.05)
                         continue
 
-                    # Camera disconnected or seized by another app after 6 consecutive failed reads
+                    # Camera truly disconnected or seized by another app after 30 consecutive failed reads
                     consecutive_read_failures = 0
                     if self.cap is not None:
                         try:
@@ -1794,7 +1820,13 @@ class PostureApp(ctk.CTk):
                     )
 
                 # Process frame through MediaPipe Pose Engine (model_complexity=0 Lite)
-                annotated_frame, metrics = self.engine.process_frame(frame)
+                try:
+                    annotated_frame, metrics = self.engine.process_frame(frame)
+                except Exception as e:
+                    print(f"[PosturFix Worker] Error during process_frame: {e}", file=sys.stderr)
+                    annotated_frame = frame
+                    metrics = PostureMetrics(state=PostureState.NO_PERSON)
+
                 self.current_metrics = metrics
                 last_check_time = now
 
@@ -1833,7 +1865,7 @@ class PostureApp(ctk.CTk):
                         self.tray_icon.title = f"PosturFix: Away / No Person • Sitting: {sitting_m}m"
 
                     if is_visible:
-                        self.after(0, self._update_ui_frame, annotated_frame, metrics)
+                        self._push_frame_to_queue(annotated_frame, metrics)
                         time.sleep(0.05)  # Fast motion ~20 FPS when window is open
                     else:
                         time.sleep(interval)  # 3.0s sleep in background
@@ -1883,8 +1915,8 @@ class PostureApp(ctk.CTk):
                     self.tray_icon.title = f"PosturFix: {status_text} ({score}% Good) • Sitting: {sitting_m}m/{target_m}m"
 
                 if is_visible:
-                    # Dispatch UI and video feed update to main thread
-                    self.after(0, self._update_ui_frame, annotated_frame, metrics)
+                    # Push frame to single-slot queue; drops old frames to prevent UI lag
+                    self._push_frame_to_queue(annotated_frame, metrics)
                     # When visible, small delay for smooth preview (fast motion)
                     delay = 0.08 if self.engine.calibrating else 0.05
                     time.sleep(delay)
@@ -1908,12 +1940,50 @@ class PostureApp(ctk.CTk):
             except Exception:
                 pass
 
+    def _push_frame_to_queue(self, annotated_frame: np.ndarray, metrics: PostureMetrics):
+        """
+        Thread-safe frame producer: Pushes the newest frame to the single-slot queue.
+        Safely drops older unconsumed frames to prevent GUI lag and event accumulation.
+        """
+        try:
+            try:
+                self._frame_queue.get_nowait()
+            except queue.Empty:
+                pass
+            self._frame_queue.put_nowait((annotated_frame, metrics))
+        except Exception:
+            pass
+
+    def _ui_poll_loop(self):
+        """
+        Main GUI thread consumer: Polls the latest processed frame from the queue.
+        Keeps the UI responsive and decoupled from camera/AI inference thread.
+        """
+        if not self.camera_running:
+            return
+
+        try:
+            if self.is_window_visible:
+                try:
+                    frame, metrics = self._frame_queue.get_nowait()
+                    self._update_ui_frame(frame, metrics)
+                except queue.Empty:
+                    pass
+        except Exception:
+            pass
+        finally:
+            if self.camera_running:
+                self.after(33, self._ui_poll_loop)
+
     def _update_ui_frame(self, annotated_frame: np.ndarray, metrics: PostureMetrics):
         """Thread-safe UI dispatcher: updates dashboard and camera canvas on Tkinter main thread."""
         if not self.is_window_visible:
             return
-        self._update_dashboard(metrics)
-        self._render_video_feed(annotated_frame)
+        try:
+            self._update_dashboard(metrics)
+            self._render_video_feed(annotated_frame)
+        except Exception:
+            pass
 
     def _render_video_feed(self, frame_bgr: np.ndarray):
         """Displays video frame on the Tkinter canvas or shows privacy shield."""
@@ -1921,26 +1991,29 @@ class PostureApp(ctk.CTk):
             self._render_privacy_screen("Privacy Mode Active\nCamera Preview Hidden • Analysis Active in RAM")
             return
 
-        canvas_w = self.video_canvas.winfo_width()
-        canvas_h = self.video_canvas.winfo_height()
-        if canvas_w < 50 or canvas_h < 50:
-            canvas_w = 540
-            canvas_h = 405
+        try:
+            canvas_w = self.video_canvas.winfo_width()
+            canvas_h = self.video_canvas.winfo_height()
+            if canvas_w < 50 or canvas_h < 50:
+                canvas_w = 540
+                canvas_h = 405
 
-        h, w, _ = frame_bgr.shape
-        scale = min(canvas_w / w, canvas_h / h)
-        new_w, new_h = max(1, int(w * scale)), max(1, int(h * scale))
+            h, w, _ = frame_bgr.shape
+            scale = min(canvas_w / w, canvas_h / h)
+            new_w, new_h = max(1, int(w * scale)), max(1, int(h * scale))
 
-        resized_bgr = cv2.resize(frame_bgr, (new_w, new_h), interpolation=cv2.INTER_LINEAR)
-        frame_rgb = cv2.cvtColor(resized_bgr, cv2.COLOR_BGR2RGB)
+            resized_bgr = cv2.resize(frame_bgr, (new_w, new_h), interpolation=cv2.INTER_LINEAR)
+            frame_rgb = cv2.cvtColor(resized_bgr, cv2.COLOR_BGR2RGB)
 
-        pil_img = Image.fromarray(frame_rgb)
-        self._current_photo = ImageTk.PhotoImage(pil_img)
+            pil_img = Image.fromarray(frame_rgb)
+            self._current_photo = ImageTk.PhotoImage(pil_img)
 
-        self.video_canvas.delete("all")
-        pos_x = (canvas_w - new_w) // 2
-        pos_y = (canvas_h - new_h) // 2
-        self.video_canvas.create_image(pos_x, pos_y, anchor="nw", image=self._current_photo)
+            self.video_canvas.delete("all")
+            pos_x = (canvas_w - new_w) // 2
+            pos_y = (canvas_h - new_h) // 2
+            self.video_canvas.create_image(pos_x, pos_y, anchor="nw", image=self._current_photo)
+        except Exception:
+            pass
 
     def _render_privacy_screen(self, message: str):
         """Renders an elegant privacy shield visual when camera preview is suppressed."""
