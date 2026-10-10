@@ -491,7 +491,7 @@ class PostureApp(ctk.CTk):
         self.cap: Optional[cv2.VideoCapture] = None
         self.camera_running = False
         self._camera_thread: Optional[threading.Thread] = None
-        self._frame_queue: queue.Queue = queue.Queue(maxsize=1)
+        self._frame_queue: queue.Queue = queue.Queue(maxsize=2)
         self._ui_poll_started: bool = False
         self.is_window_visible: bool = not start_hidden
         self.privacy_mode = self.config.privacy_mode_default
@@ -1556,6 +1556,10 @@ class PostureApp(ctk.CTk):
                 for _ in range(12):
                     ret, test_frame = cap.read()
                     if ret and test_frame is not None and test_frame.size > 0:
+                        try:
+                            cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+                        except Exception:
+                            pass
                         return cap
                     time.sleep(0.08)
 
@@ -1942,38 +1946,47 @@ class PostureApp(ctk.CTk):
 
     def _push_frame_to_queue(self, annotated_frame: np.ndarray, metrics: PostureMetrics):
         """
-        Thread-safe frame producer: Pushes the newest frame to the single-slot queue.
-        Safely drops older unconsumed frames to prevent GUI lag and event accumulation.
+        Thread-safe frame producer: Pushes the newest frame to the bounded queue.
+        Uses put_nowait() and drops older frames if the GUI is reading slower than the camera is capturing.
+        Guarantees the worker thread never blocks and the queue never overflows or leaks memory.
         """
         try:
-            try:
-                self._frame_queue.get_nowait()
-            except queue.Empty:
-                pass
             self._frame_queue.put_nowait((annotated_frame, metrics))
+        except queue.Full:
+            try:
+                # Queue is full: remove the oldest unconsumed frame and insert the newest one
+                self._frame_queue.get_nowait()
+                self._frame_queue.put_nowait((annotated_frame, metrics))
+            except Exception:
+                pass
         except Exception:
             pass
 
     def _ui_poll_loop(self):
         """
         Main GUI thread consumer: Polls the latest processed frame from the queue.
-        Keeps the UI responsive and decoupled from camera/AI inference thread.
+        Drains any queued backlog to ensure the GUI only displays the freshest frame without lag.
         """
         if not self.camera_running:
             return
 
         try:
             if self.is_window_visible:
-                try:
-                    frame, metrics = self._frame_queue.get_nowait()
+                latest_item = None
+                while True:
+                    try:
+                        latest_item = self._frame_queue.get_nowait()
+                    except queue.Empty:
+                        break
+
+                if latest_item is not None:
+                    frame, metrics = latest_item
                     self._update_ui_frame(frame, metrics)
-                except queue.Empty:
-                    pass
         except Exception:
             pass
         finally:
             if self.camera_running:
-                self.after(33, self._ui_poll_loop)
+                self.after(30, self._ui_poll_loop)
 
     def _update_ui_frame(self, annotated_frame: np.ndarray, metrics: PostureMetrics):
         """Thread-safe UI dispatcher: updates dashboard and camera canvas on Tkinter main thread."""
