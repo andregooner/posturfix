@@ -521,50 +521,149 @@ class PostureApp(ctk.CTk):
 
         self._has_notified_camera_conflict: bool = False
 
-        # Gatekeeper: 100% Offline License Verification
+        # Gatekeeper: 100% Offline License Verification & 3-Day Free Trial
         self.is_licensed = license_manager.is_license_valid()
+        self.trial_info = license_manager.get_trial_status()
+        self.is_trial_active = (not self.is_licensed) and self.trial_info.is_active
         self._activation_window: Optional[license_manager.ActivationWindow] = None
+        self.trial_banner: Optional[ctk.CTkFrame] = None
 
         # Build UI Layout
         self._build_header()
+        if not self.is_licensed and self.is_trial_active:
+            self._build_trial_banner()
         self._build_body()
         self._build_footer()
 
         # Intercept Window Close ('X' button) to minimize to tray
         self.protocol("WM_DELETE_WINDOW", self.hide_to_tray)
 
-        if not self.is_licensed:
-            # Block main UI & camera processing until valid license key is entered
+        if self.is_licensed or self.is_trial_active:
+            # Valid license OR within active 3-day free trial -> full functionality!
+            self._setup_system_tray()
+            self.start_camera()
+            if start_hidden:
+                self.withdraw()
+        else:
+            # Trial expired (> 3 days) and not licensed -> Block main camera UI & force paywall
             self.withdraw()
             self._activation_window = license_manager.ActivationWindow(
                 parent=self,
                 on_success_callback=self._on_activation_success,
                 on_close_callback=self.quit_application,
+                is_post_trial=True,
+                trial_status=self.trial_info,
+                checkout_url=self.config.mayar_checkout_url,
             )
-        else:
-            # Valid local validation token exists -> Bypass activation and run 100% offline
-            self._setup_system_tray()
-            self.start_camera()
-            if start_hidden:
-                self.withdraw()
 
     def _on_activation_success(self, key: str):
-        """Callback executed when first-time license activation succeeds."""
+        """Callback executed when license activation succeeds."""
         self.is_licensed = True
+        self.is_trial_active = False
+        if hasattr(self, "trial_banner") and self.trial_banner:
+            try:
+                self.trial_banner.pack_forget()
+                self.trial_banner.destroy()
+            except Exception:
+                pass
+            self.trial_banner = None
+
         if hasattr(self, "privacy_badge"):
             self.privacy_badge.configure(
                 text=" [100% OFFLINE • LICENSED] ",
                 text_color="#10B981",
                 fg_color=("#D1FAE5", "#064E3B"),
             )
+        if hasattr(self, "about_license_lbl"):
+            self.about_license_lbl.configure(
+                text="License: Lifetime Pro (Active)",
+                text_color="#10B981",
+            )
+        if hasattr(self, "about_upgrade_btn") and self.about_upgrade_btn:
+            try:
+                self.about_upgrade_btn.pack_forget()
+            except Exception:
+                pass
+
         self._setup_system_tray()
-        self.start_camera()
+        if not self.camera_running:
+            self.start_camera()
         self.show_window()
+
+    def _on_upgrade_clicked(self):
+        """Opens the license activation / checkout modal while user is within free trial."""
+        if self._activation_window and self._activation_window.winfo_exists():
+            self._activation_window.lift()
+            self._activation_window.focus_force()
+            return
+        self._activation_window = license_manager.ActivationWindow(
+            parent=self,
+            on_success_callback=self._on_activation_success,
+            on_close_callback=None,
+            is_post_trial=False,
+            trial_status=self.trial_info,
+            checkout_url=self.config.mayar_checkout_url,
+        )
+
+    def _build_trial_banner(self):
+        """
+        Renders a sleek, unobtrusive banner at the top of the UI during the 3-day free trial.
+        Requirement: 'Trial: X days left. [Upgrade Now]' with full app functionality enabled.
+        """
+        if self.is_licensed or not self.is_trial_active:
+            return
+
+        self.trial_banner = ctk.CTkFrame(
+            self,
+            height=36,
+            corner_radius=0,
+            fg_color=("#FEF3C7", "#2D1D09"),
+        )
+        self.trial_banner.pack(fill="x", side="top", padx=0, pady=0)
+
+        banner_content = ctk.CTkFrame(self.trial_banner, fg_color="transparent")
+        banner_content.pack(fill="both", expand=True, padx=20, pady=4)
+
+        days_left = self.trial_info.days_left
+        if days_left > 1:
+            time_text = f"{days_left} days"
+        elif days_left == 1:
+            time_text = "1 day"
+        else:
+            time_text = f"{max(1, self.trial_info.hours_left)} hours"
+
+        lbl = ctk.CTkLabel(
+            banner_content,
+            text=f"⏳ Trial: {time_text} left.",
+            font=ctk.CTkFont(size=12, weight="bold"),
+            text_color=("#92400E", "#FCD34D"),
+        )
+        lbl.pack(side="left")
+
+        upgrade_btn = ctk.CTkButton(
+            banner_content,
+            text="[Upgrade Now]",
+            font=ctk.CTkFont(size=12, weight="bold"),
+            width=115,
+            height=26,
+            fg_color="#F59E0B",
+            hover_color="#D97706",
+            text_color="#18181B",
+            command=self._on_upgrade_clicked,
+        )
+        upgrade_btn.pack(side="right")
 
     def _setup_system_tray(self):
         """Initializes the background system tray icon and context menu."""
-        menu = pystray.Menu(
+        menu_items = [
             pystray.MenuItem("PosturFix", None, enabled=False),
+        ]
+        if self.is_trial_active:
+            days_msg = f"{self.trial_info.days_left}d" if self.trial_info.days_left > 0 else f"{self.trial_info.hours_left}h"
+            menu_items.append(
+                pystray.MenuItem(f"Upgrade to Lifetime ({days_msg} Trial Left)", lambda icon, item: self.after(0, self._on_upgrade_clicked))
+            )
+        menu_items.extend([
             pystray.Menu.SEPARATOR,
             pystray.MenuItem("Show Window", self._on_tray_show_window, default=True),
             pystray.MenuItem("Quick Calibrate", self._on_tray_quick_calibrate),
@@ -588,7 +687,8 @@ class PostureApp(ctk.CTk):
             pystray.MenuItem("Check for Updates", self._on_tray_check_updates),
             pystray.Menu.SEPARATOR,
             pystray.MenuItem("Quit/Exit", self._on_tray_quit_app),
-        )
+        ])
+        menu = pystray.Menu(*menu_items)
 
         self.tray_icon = pystray.Icon(
             name="PosturFix",
@@ -1113,12 +1213,26 @@ class PostureApp(ctk.CTk):
         )
         title_lbl.pack(side="left")
 
+        if self.is_licensed:
+            badge_text = " [100% OFFLINE • LICENSED] "
+            badge_color = "#10B981"
+            badge_bg = ("#D1FAE5", "#064E3B")
+        elif self.is_trial_active:
+            days_str = f"{self.trial_info.days_left}D" if self.trial_info.days_left > 0 else f"{self.trial_info.hours_left}H"
+            badge_text = f" [FREE TRIAL • {days_str} LEFT] "
+            badge_color = "#F59E0B"
+            badge_bg = ("#FEF3C7", "#78350F")
+        else:
+            badge_text = " [100% OFFLINE • ZERO TELEMETRY] "
+            badge_color = "#10B981"
+            badge_bg = ("#D1FAE5", "#064E3B")
+
         self.privacy_badge = ctk.CTkLabel(
             title_box,
-            text=" [100% OFFLINE • LICENSED] " if self.is_licensed else " [100% OFFLINE • ZERO TELEMETRY] ",
+            text=badge_text,
             font=ctk.CTkFont(size=11, weight="bold"),
-            text_color="#10B981",
-            fg_color=("#D1FAE5", "#064E3B"),
+            text_color=badge_color,
+            fg_color=badge_bg,
             corner_radius=6,
         )
         self.privacy_badge.pack(side="left", padx=(12, 0))
@@ -1483,7 +1597,31 @@ class PostureApp(ctk.CTk):
             font=ctk.CTkFont(size=11),
             text_color="gray",
         )
-        copyright_lbl.pack(anchor="w", padx=15, pady=(0, 6))
+        copyright_lbl.pack(anchor="w", padx=15, pady=(0, 4))
+
+        lic_text = "License: Lifetime Pro (Active)" if self.is_licensed else f"License: Free Trial ({self.trial_info.days_left} days left)"
+        self.about_license_lbl = ctk.CTkLabel(
+            about_card,
+            text=lic_text,
+            font=ctk.CTkFont(size=11, weight="bold"),
+            text_color="#10B981" if self.is_licensed else "#F59E0B",
+        )
+        self.about_license_lbl.pack(anchor="w", padx=15, pady=(0, 4))
+
+        if self.is_trial_active:
+            self.about_upgrade_btn = ctk.CTkButton(
+                about_card,
+                text="Upgrade to Lifetime (Rp 98.000)",
+                height=28,
+                fg_color="#F59E0B",
+                hover_color="#D97706",
+                text_color="#18181B",
+                font=ctk.CTkFont(size=11, weight="bold"),
+                command=self._on_upgrade_clicked,
+            )
+            self.about_upgrade_btn.pack(anchor="w", padx=15, pady=(0, 6))
+        else:
+            self.about_upgrade_btn = None
 
         self.update_status_lbl = ctk.CTkLabel(
             about_card,

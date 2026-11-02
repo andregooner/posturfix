@@ -15,10 +15,11 @@ dist/
 *.spec.bak
 *.zip
 
-# Local configurations / logs / licenses
+# Local configurations / logs / licenses / trial tickets
 *.log
 *.key
 license.key
+.pfx_trial
 .vscode/
 .idea/
 

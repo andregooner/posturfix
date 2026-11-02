@@ -71,3 +71,8 @@ class PostureConfig:
 
     # Camera Conflict Handling
     camera_retry_interval_busy_seconds: float = 60.0  # Backoff sleep when camera is locked by another app
+
+    # 3-Day Free Trial & Commercial Settings
+    trial_duration_days: int = 3
+    mayar_checkout_url: str = "https://mayar.id/posturfix"
+    license_price_idr: str = "Rp 98.000"
